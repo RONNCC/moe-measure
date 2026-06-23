@@ -1,0 +1,146 @@
+{
+  "metadata": {
+    "backend": "transformers",
+    "hybrid": false,
+    "argv": [
+      "--backend",
+      "transformers",
+      "--model",
+      "yujiepan/phi-moe-tiny-random",
+      "--prompt",
+      "The quick brown fox",
+      "--tokens",
+      "4",
+      "--passes",
+      "3",
+      "--warmup",
+      "1",
+      "--out",
+      "runs/yujiepan-cpu",
+      "--title",
+      "yujiepan/phi-moe-tiny-random -- REAL CPU forward (2.5M params)"
+    ],
+    "config_path": null,
+    "timestamp": "2026-06-23T20:29:49"
+  },
+  "summary": {
+    "total_us": 29517.131999999867,
+    "per_bucket_us": {
+      "cpu_python": 0.0,
+      "cpu_native": 28593.091999999895,
+      "gpu_compute": 0.0,
+      "gpu_memory": 0.0,
+      "gpu_idle_gap": 0.0,
+      "gpu_idle_sync": 228.21600000003082,
+      "network": 0.0,
+      "mem_transfer": 0.0,
+      "allocator": 695.8239999999432
+    },
+    "per_bucket_pct": {
+      "cpu_python": 0.0,
+      "cpu_native": 96.869,
+      "gpu_compute": 0.0,
+      "gpu_memory": 0.0,
+      "gpu_idle_gap": 0.0,
+      "gpu_idle_sync": 0.773,
+      "network": 0.0,
+      "mem_transfer": 0.0,
+      "allocator": 2.357
+    },
+    "per_bucket_count": {
+      "cpu_python": 0,
+      "cpu_native": 90,
+      "gpu_compute": 0,
+      "gpu_memory": 0,
+      "gpu_idle_gap": 0,
+      "gpu_idle_sync": 1,
+      "network": 0,
+      "mem_transfer": 0,
+      "allocator": 4
+    },
+    "n_events": 95
+  },
+  "buckets": [
+    {
+      "id": "cpu_python",
+      "label": "CPU \u2014 Python",
+      "color": "#5B8FF9",
+      "time_us": 0.0,
+      "time_ms": 0.0,
+      "percent": 0.0,
+      "count": 0
+    },
+    {
+      "id": "cpu_native",
+      "label": "CPU \u2014 Native",
+      "color": "#1F4E9D",
+      "time_us": 28593.091999999895,
+      "time_ms": 28.593091999999896,
+      "percent": 96.869,
+      "count": 90
+    },
+    {
+      "id": "gpu_compute",
+      "label": "GPU Compute",
+      "color": "#F6BD16",
+      "time_us": 0.0,
+      "time_ms": 0.0,
+      "percent": 0.0,
+      "count": 0
+    },
+    {
+      "id": "gpu_memory",
+      "label": "GPU Memory-bound",
+      "color": "#E8684A",
+      "time_us": 0.0,
+      "time_ms": 0.0,
+      "percent": 0.0,
+      "count": 0
+    },
+    {
+      "id": "gpu_idle_gap",
+      "label": "GPU Idle \u2014 gap",
+      "color": "#9AA0A6",
+      "time_us": 0.0,
+      "time_ms": 0.0,
+      "percent": 0.0,
+      "count": 0
+    },
+    {
+      "id": "gpu_idle_sync",
+      "label": "GPU Idle \u2014 sync",
+      "color": "#5F6368",
+      "time_us": 228.21600000003082,
+      "time_ms": 0.2282160000000308,
+      "percent": 0.773,
+      "count": 1
+    },
+    {
+      "id": "network",
+      "label": "Network",
+      "color": "#6DC354",
+      "time_us": 0.0,
+      "time_ms": 0.0,
+      "percent": 0.0,
+      "count": 0
+    },
+    {
+      "id": "mem_transfer",
+      "label": "Mem Transfer (DMA)",
+      "color": "#9270CA",
+      "time_us": 0.0,
+      "time_ms": 0.0,
+      "percent": 0.0,
+      "count": 0
+    },
+    {
+      "id": "allocator",
+      "label": "Allocator",
+      "color": "#FF9D4D",
+      "time_us": 695.8239999999432,
+      "time_ms": 0.6958239999999433,
+      "percent": 2.357,
+      "count": 4
+    }
+  ]
+}

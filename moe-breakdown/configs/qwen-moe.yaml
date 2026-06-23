@@ -1,0 +1,8 @@
+# Qwen1.5-MoE-A2.7B -- 60 experts, top-4 routing, 4 active.
+synthetic:
+  num_experts: 60
+  top_k: 4
+  hidden: 2048
+  ffn_hidden: 4096
+  tokens: 256
+model: Qwen/Qwen1.5-MoE-A2.7B

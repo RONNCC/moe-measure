@@ -1,0 +1,10 @@
+bucket,label,time_us,time_ms,percent,count
+cpu_python,CPU — Python,6000.28,6.0003,4.611,7
+cpu_native,CPU — Native,4693.60,4.6936,3.606,3
+gpu_compute,GPU Compute,78573.19,78.5732,60.374,30
+gpu_memory,GPU Memory-bound,5952.97,5.9530,4.574,5
+gpu_idle_gap,GPU Idle — gap,3046.37,3.0464,2.341,2
+gpu_idle_sync,GPU Idle — sync,7091.45,7.0914,5.449,1
+network,Network,13639.68,13.6397,10.481,4
+mem_transfer,Mem Transfer (DMA),6327.42,6.3274,4.862,3
+allocator,Allocator,4818.10,4.8181,3.702,3

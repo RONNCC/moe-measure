@@ -1,0 +1,13 @@
+# Tiny in-tree MoE -- 3 experts, each ~1M params, single-threaded CPU.
+# Default configuration.  Run with:
+#   python scripts/run_breakdown.py --backend tiny --config configs/tiny.yaml
+#   python scripts/run_breakdown.py --backend tiny --config configs/tiny.yaml --passes 20
+tiny:
+  vocab_size: 1024
+  hidden_dim: 256
+  expert_hidden_dim: 2048      # chosen so each expert is ~1.05 M params
+  num_experts: 3
+  top_k: 1
+  seq_len: 32
+  batch_size: 1
+  seed: 0

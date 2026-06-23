@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moe-breakdown"
+version = "0.1.0"
+description = "Execution-time breakdown for mixture-of-experts models"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{name = "moe-breakdown"}]
+dependencies = [
+    "matplotlib>=3.5",
+    "numpy>=1.22",
+    "pyyaml>=6.0",
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+hf = ["transformers>=4.40", "accelerate>=0.27"]
+vllm = ["vllm>=0.4"]
+
+[project.scripts]
+moe-breakdown = "scripts.run_breakdown:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"moe_breakdown" = ["py.typed"]
