@@ -19,6 +19,10 @@ case "$MODE" in
     module purge
     module load gcc/12.3.0 python/3.11 cuda/12.1.1
     ensure_local_config
+    ENV_DIR="$HOME/scratch/moe-breakdown-login-venv"
+    SKIP_VLLM=1
+    export ENV_DIR SKIP_VLLM
+    source scripts/setup_ice_env.sh
     CONFIG_PATH="$CONFIG_PATH" bash scripts/submit_qwen3_30b_a3b_initial.sh dry-run
     ;;
   submit)
@@ -26,27 +30,31 @@ case "$MODE" in
     module purge
     module load gcc/12.3.0 python/3.11 cuda/12.1.1
     ensure_local_config
+    ENV_DIR="$HOME/scratch/moe-breakdown-login-venv"
+    SKIP_VLLM=1
+    export ENV_DIR SKIP_VLLM
+    source scripts/setup_ice_env.sh
     CONFIG_PATH="$CONFIG_PATH" bash scripts/submit_qwen3_30b_a3b_initial.sh submit
     ;;
   setup)
     cd "$ROOT_DIR"
-    bash scripts/setup_ice_env.sh
+    source scripts/setup_ice_env.sh
     ;;
   profile-none)
     cd "$ROOT_DIR"
-    bash scripts/setup_ice_env.sh
+    source scripts/setup_ice_env.sh
     export PROFILE_TOOL=none
     bash scripts/profile_qwen3_30b_a3b_two_conditions.sh
     ;;
   profile-nsys)
     cd "$ROOT_DIR"
-    bash scripts/setup_ice_env.sh
+    source scripts/setup_ice_env.sh
     export PROFILE_TOOL=nsys
     bash scripts/profile_qwen3_30b_a3b_two_conditions.sh
     ;;
   profile-ncu)
     cd "$ROOT_DIR"
-    bash scripts/setup_ice_env.sh
+    source scripts/setup_ice_env.sh
     export PROFILE_TOOL=ncu
     bash scripts/profile_qwen3_30b_a3b_two_conditions.sh
     ;;

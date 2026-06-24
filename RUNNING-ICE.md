@@ -199,7 +199,7 @@ Once the allocation starts:
 ```bash
 cd ~/scratch/moe-breakdown
 export VLLM_SPEC='vllm'
-bash scripts/setup_ice_env.sh
+source scripts/setup_ice_env.sh
 ```
 
 That should leave you in an activated env.
@@ -459,7 +459,7 @@ CONFIG_PATH=$PWD/configs/study.qwen3_30b_a3b.local.yaml bash scripts/submit_qwen
 salloc --qos=coc-ice --gres=gpu:a100:4 --cpus-per-task=8 --mem=96G --time=02:00:00
 cd ~/scratch/moe-breakdown
 export VLLM_SPEC='vllm'
-bash scripts/setup_ice_env.sh
+source scripts/setup_ice_env.sh
 export PROFILE_TOOL=none
 bash scripts/profile_qwen3_30b_a3b_two_conditions.sh
 ```

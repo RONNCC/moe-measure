@@ -17,7 +17,11 @@ if [[ ! -d "$ENV_DIR" ]]; then
   uv venv "$ENV_DIR" --python python3.11
 fi
 
+SKIP_VLLM="${SKIP_VLLM:-0}"
 READY_MARKER="$ENV_DIR/.fused_moe_kernel_study_ready"
+if [[ "$SKIP_VLLM" == "1" ]]; then
+  READY_MARKER="$ENV_DIR/.fused_moe_kernel_study_ready_cli"
+fi
 # shellcheck disable=SC1090
 source "$ENV_DIR/bin/activate"
 
@@ -29,6 +33,8 @@ fi
 uv pip install --upgrade pip setuptools wheel
 uv pip install -e .
 uv pip install pyyaml
-VLLM_SPEC="${VLLM_SPEC:-vllm}"
-uv pip install "$VLLM_SPEC"
+if [[ "$SKIP_VLLM" != "1" ]]; then
+  VLLM_SPEC="${VLLM_SPEC:-vllm}"
+  uv pip install "$VLLM_SPEC"
+fi
 touch "$READY_MARKER"
