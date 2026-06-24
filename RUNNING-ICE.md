@@ -9,7 +9,7 @@ It assumes:
 - modules:
   - `gcc/12.3.0`
   - `python/3.11`
-  - `cuda/13.0.1`
+  - `cuda/12.1.1`
 - benchmark target: **Qwen3-30B-A3B initial direct-kernel validation**
 
 The goal here is not to give every possible option. The goal is to give you a small number of exact commands that should work first.
@@ -73,7 +73,7 @@ These are the defaults I pinned into the current workflow:
 - modules:
   - `gcc/12.3.0`
   - `python/3.11`
-  - `cuda/13.0.1`
+  - `cuda/12.1.1`
 
 ---
 
@@ -84,7 +84,7 @@ This does **not** require `torch` anymore.
 ```bash
 cd ~/scratch/moe-breakdown
 module purge
-module load gcc/12.3.0 python/3.11 cuda/13.0.1
+module load gcc/12.3.0 python/3.11 cuda/12.1.1
 bash scripts/submit_qwen3_30b_a3b_initial.sh dry-run
 ```
 
@@ -105,7 +105,7 @@ Default config:
 ```bash
 cd ~/scratch/moe-breakdown
 module purge
-module load gcc/12.3.0 python/3.11 cuda/13.0.1
+module load gcc/12.3.0 python/3.11 cuda/12.1.1
 export VLLM_SPEC='vllm'
 bash scripts/submit_qwen3_30b_a3b_initial.sh submit
 ```
@@ -115,7 +115,7 @@ With your local config copy:
 ```bash
 cd ~/scratch/moe-breakdown
 module purge
-module load gcc/12.3.0 python/3.11 cuda/13.0.1
+module load gcc/12.3.0 python/3.11 cuda/12.1.1
 export VLLM_SPEC='vllm'
 CONFIG_PATH=$PWD/configs/study.qwen3_30b_a3b.local.yaml \
   bash scripts/submit_qwen3_30b_a3b_initial.sh submit
@@ -170,7 +170,7 @@ Default behavior:
 - loads
   - `gcc/12.3.0`
   - `python/3.11`
-  - `cuda/13.0.1`
+  - `cuda/12.1.1`
 - installs `uv` to `~/.local/bin` if missing
 - creates env at
   - `$TMPDIR/moe-breakdown-venv` if `$TMPDIR` exists
@@ -446,7 +446,7 @@ Run these exact commands in order.
 ```bash
 cd ~/scratch/moe-breakdown
 module purge
-module load gcc/12.3.0 python/3.11 cuda/13.0.1
+module load gcc/12.3.0 python/3.11 cuda/12.1.1
 cp configs/study.qwen3_30b_a3b.initial.yaml configs/study.qwen3_30b_a3b.local.yaml
 export VLLM_SPEC='vllm'
 CONFIG_PATH=$PWD/configs/study.qwen3_30b_a3b.local.yaml bash scripts/submit_qwen3_30b_a3b_initial.sh dry-run

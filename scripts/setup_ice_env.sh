@@ -5,7 +5,7 @@ set -euo pipefail
 # want to change them.
 GCC_MODULE="${GCC_MODULE:-gcc/12.3.0}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.11}"
-CUDA_MODULE="${CUDA_MODULE:-cuda/13.0.1}"
+CUDA_MODULE="${CUDA_MODULE:-cuda/12.1.1}"
 UV_SPEC="${UV_SPEC:-uv}"
 VLLM_SPEC="${VLLM_SPEC:-vllm}"
 WORKDIR="${WORKDIR:-$HOME/scratch/moe-breakdown}"

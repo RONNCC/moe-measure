@@ -13,7 +13,7 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-$HOME/scratch/moe-breakdown}"
 VENV="${VENV:-}"
 UV_ENV_DIR="${UV_ENV_DIR:-${TMPDIR:-}/moe-breakdown-venv}"
-MODULES="${MODULES:-gcc/12.3.0 python/3.11 cuda/13.0.1}"
+MODULES="${MODULES:-gcc/12.3.0 python/3.11 cuda/12.1.1}"
 PROFILE_TOOL="${PROFILE_TOOL:-nsys}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 

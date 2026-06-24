@@ -17,14 +17,14 @@ case "$MODE" in
   dry-run)
     cd "$ROOT_DIR"
     module purge
-    module load gcc/12.3.0 python/3.11 cuda/13.0.1
+    module load gcc/12.3.0 python/3.11 cuda/12.1.1
     ensure_local_config
     CONFIG_PATH="$CONFIG_PATH" bash scripts/submit_qwen3_30b_a3b_initial.sh dry-run
     ;;
   submit)
     cd "$ROOT_DIR"
     module purge
-    module load gcc/12.3.0 python/3.11 cuda/13.0.1
+    module load gcc/12.3.0 python/3.11 cuda/12.1.1
     ensure_local_config
     CONFIG_PATH="$CONFIG_PATH" bash scripts/submit_qwen3_30b_a3b_initial.sh submit
     ;;

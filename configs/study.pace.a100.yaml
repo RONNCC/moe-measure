@@ -62,7 +62,7 @@ slurm:
   gpu_type: a100
   use_gres: true
   mem: 128G
-  modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
+  modules: [gcc/12.3.0, python/3.11, cuda/12.1.1]
   workdir: /home/$USER/scratch/moe-breakdown
   uv_env_dir: $TMPDIR/moe-breakdown-venv
   extra_sbatch_args: []
