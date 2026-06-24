@@ -13,12 +13,15 @@ Use cases:
   * Compare kernels (custom Triton vs. torch._grouped_mm vs. naive).
 """
 
-from .moe_kernel import (
-    KernelMeasurement,
-    MoEKernelConfig,
-    measure_moe_kernel_latency,
-    run_sweep,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .moe_kernel import (
+        KernelMeasurement,
+        MoEKernelConfig,
+        measure_moe_kernel_latency,
+        run_sweep,
+    )
 
 __all__ = [
     "MoEKernelConfig",
@@ -26,3 +29,22 @@ __all__ = [
     "measure_moe_kernel_latency",
     "run_sweep",
 ]
+
+
+def __getattr__(name: str):
+    if name in __all__:
+        from .moe_kernel import (
+            KernelMeasurement,
+            MoEKernelConfig,
+            measure_moe_kernel_latency,
+            run_sweep,
+        )
+
+        namespace = {
+            "MoEKernelConfig": MoEKernelConfig,
+            "KernelMeasurement": KernelMeasurement,
+            "measure_moe_kernel_latency": measure_moe_kernel_latency,
+            "run_sweep": run_sweep,
+        }
+        return namespace[name]
+    raise AttributeError(name)

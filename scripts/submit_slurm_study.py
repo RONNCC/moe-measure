@@ -21,6 +21,17 @@ def _add_if(cmd: list[str], flag: str, value: str | None) -> None:
         cmd.extend([flag, value])
 
 
+def _normalize_path_for_export(value: str | None, default: str | None = None) -> str:
+    raw = value or default or ""
+    if not raw:
+        return ""
+    raw = os.path.expanduser(raw)
+    # Preserve shell variables like $TMPDIR for expansion on the compute node.
+    if "$" in raw:
+        return raw
+    return str(Path(os.path.expandvars(raw)).resolve())
+
+
 def build_sbatch_command(config_path: Path, tp: int, ep: int, dry_run: bool = False) -> list[str]:
     cfg = load_study_config(config_path)
     slurm = cfg.slurm
@@ -55,9 +66,9 @@ def build_sbatch_command(config_path: Path, tp: int, ep: int, dry_run: bool = Fa
     _add_if(cmd, "--constraint", slurm.constraint)
     cmd.extend(slurm.extra_sbatch_args)
 
-    workdir = os.path.expandvars(os.path.expanduser(slurm.workdir)) if slurm.workdir else str(ROOT)
-    venv = os.path.expandvars(os.path.expanduser(slurm.venv)) if slurm.venv else ""
-    uv_env_dir = os.path.expandvars(os.path.expanduser(slurm.uv_env_dir)) if slurm.uv_env_dir else ""
+    workdir = _normalize_path_for_export(slurm.workdir, default=str(ROOT))
+    venv = _normalize_path_for_export(slurm.venv)
+    uv_env_dir = _normalize_path_for_export(slurm.uv_env_dir)
 
     export_bits = {
         "ALL": None,
@@ -65,7 +76,7 @@ def build_sbatch_command(config_path: Path, tp: int, ep: int, dry_run: bool = Fa
         "TP_SIZE": str(tp),
         "EP_SIZE": str(ep),
         "OUT_DIR": str(out_dir.resolve()),
-        "WORKDIR": str(Path(workdir).resolve()),
+        "WORKDIR": workdir,
         "VENV": venv,
         "MODULES": " ".join(slurm.modules),
         "CPUS_PER_TASK": str(slurm.cpus_per_task),

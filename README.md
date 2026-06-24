@@ -2,6 +2,10 @@
 
 A direct **MoE kernel sweep** benchmark suite for the characterization study you described.
 
+For the concrete Georgia Tech ICE command-by-command workflow, see:
+
+- `RUNNING-ICE.md`
+
 ## Scope
 
 This suite measures **only** the fused MoE kernel path.
@@ -71,8 +75,8 @@ and a `uv` bootstrap flow inside the Slurm launch path.
 
 The expectation is that you run this from scratch storage, e.g.:
 
-- repo: `~/scratch/fused-moe-kernel-study`
-- env: `~/scratch/fused-moe-kernel-study-venv`
+- repo: `~/scratch/moe-breakdown`
+- env: `~/scratch/moe-breakdown-venv`
 
 The example config assumes:
 
@@ -208,8 +212,8 @@ I added an initial smoke-study config and profile scripts for Qwen3-30B-A3B:
 
 ```bash
 cd ~/scratch
-git clone <your-repo-url> fused-moe-kernel-study
-cd fused-moe-kernel-study
+git clone <your-repo-url> moe-breakdown
+cd moe-breakdown
 ```
 
 ### 2. Edit the PACE config
@@ -258,7 +262,7 @@ or a source checkout / wheel path appropriate for your environment.
 For a fixed point such as `tp=1, ep=4`:
 
 ```bash
-cd fused-moe-kernel-study
+cd moe-breakdown
 PYTHONPATH=src torchrun --nproc-per-node=4 \
   scripts/run_direct_moe_sweep.py \
   --config configs/study.example.yaml \

@@ -21,7 +21,7 @@ CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 VENV="${VENV:-}"
 MODULES="${MODULES:-}"
 OUT_DIR="${OUT_DIR:-}"
-UV_ENV_DIR="${UV_ENV_DIR:-}"
+UV_ENV_DIR="${UV_ENV_DIR:-${TMPDIR:-}/moe-breakdown-venv}"
 
 cd "$WORKDIR"
 
@@ -31,9 +31,19 @@ if [[ -n "$MODULES" ]]; then
   module load $MODULES
 fi
 
-if [[ -n "$UV_ENV_DIR" ]]; then
+if [[ -n "${TMPDIR:-}" ]]; then
+  export UV_CACHE_DIR="${UV_CACHE_DIR:-$TMPDIR/uv-cache}"
+  export HF_HOME="${HF_HOME:-$TMPDIR/hf-cache}"
+  export HF_HUB_CACHE="${HF_HUB_CACHE:-$TMPDIR/hf-cache}"
+  export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$TMPDIR/triton-cache}"
+  export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$TMPDIR/torchinductor-cache}"
+  mkdir -p "$UV_CACHE_DIR" "$HF_HOME" "$HF_HUB_CACHE" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
+else
   export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/scratch/.cache/uv}"
   mkdir -p "$UV_CACHE_DIR"
+fi
+
+if [[ -n "$UV_ENV_DIR" ]]; then
   bash scripts/bootstrap_uv_env.sh "$UV_ENV_DIR"
   VENV="$UV_ENV_DIR"
 fi
