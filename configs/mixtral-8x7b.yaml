@@ -1,9 +1,0 @@
-# Mixtral 8x7B -- 8 experts, top-2 routing.
-# Run: python scripts/run_breakdown.py --config configs/mixtral-8x7b.yaml
-synthetic:
-  num_experts: 8
-  top_k: 2
-  hidden: 4096
-  ffn_hidden: 14336
-  tokens: 256
-model: mistralai/Mixtral-8x7B-Instruct-v0.1

@@ -1,0 +1,63 @@
+study_name: fused-moe-characterization
+all2all_backend: deepep_low_latency
+output_root: runs
+
+# Balanced routing is alpha=1.0. Larger alpha makes the first
+# `hot_expert_count` experts proportionally hotter.
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 0
+warmup_iters: 10
+measure_iters: 50
+collect_buckets: true
+bucket_profile_iters: 5
+bucket_full_events: true
+
+# Run both one-at-a-time sweeps and the joint full-factorial sweep.
+sweep_modes:
+  - one_at_a_time
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 512
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: shape_a
+    hidden_size: 4096
+    intermediate_size: 14336
+    num_experts: 16
+    topk: 2
+    dtype: bfloat16
+  - name: shape_b
+    hidden_size: 7168
+    intermediate_size: 24576
+    num_experts: 16
+    topk: 2
+    dtype: bfloat16
+
+# alpha = requested imbalance ratio.
+alphas: [1.0, 2.0, 4.0, 8.0]
+tokens: [128, 256, 512, 1024, 2048]
+
+# Important: TP/EP is executed as one separate job per point.
+parallel_points:
+  - {tp: 1, ep: 1}
+  - {tp: 1, ep: 2}
+  - {tp: 1, ep: 4}
+  - {tp: 2, ep: 2}
+
+slurm:
+  partition: gpu
+  time: 02:00:00
+  cpus_per_task: 8
+  gpus_per_node: 8
+  mem: 64G
+  modules: [cuda/12.4, python/3.11]
+  venv: /path/to/venv
+  workdir: /path/to/fused-moe-kernel-study
+  extra_sbatch_args: []

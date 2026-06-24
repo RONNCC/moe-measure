@@ -1,0 +1,502 @@
+from __future__ import annotations
+
+import json
+import math
+import os
+import statistics
+import subprocess
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.distributed as dist
+
+from .buckets import breakdown_to_rows, categorize_dicts, profiler_to_event_dicts
+from .config import BenchmarkCondition, StudyConfig
+from .distributed import DistributedEnv
+from .reporting import append_jsonl, ensure_dir, write_csv, write_json
+from .routing import make_routing_batch
+from .vllm_adapter import KernelArtifacts, build_kernel_artifacts, vllm_config_context
+
+
+def dtype_from_name(name: str) -> torch.dtype:
+    name = name.lower()
+    mapping = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    if name not in mapping:
+        raise ValueError(f"Unsupported dtype={name!r}")
+    return mapping[name]
+
+
+def next_power_of_two(x: int) -> int:
+    if x <= 1:
+        return 1
+    return 1 << (x - 1).bit_length()
+
+
+def rank_geometry(rank: int, tp_size: int) -> tuple[int, int]:
+    ep_rank = rank // tp_size
+    tp_rank = rank % tp_size
+    return ep_rank, tp_rank
+
+
+def local_num_experts(num_experts: int, ep_size: int, ep_rank: int) -> int:
+    base = num_experts // ep_size
+    remainder = num_experts % ep_size
+    return base + 1 if ep_rank < remainder else base
+
+
+def local_expert_start(num_experts: int, ep_size: int, ep_rank: int) -> int:
+    base = num_experts // ep_size
+    remainder = num_experts % ep_size
+    return ep_rank * base + min(ep_rank, remainder)
+
+
+def make_expert_map(num_experts: int, ep_size: int, ep_rank: int, device: torch.device) -> torch.Tensor | None:
+    if ep_size == 1:
+        return None
+    start = local_expert_start(num_experts, ep_size, ep_rank)
+    count = local_num_experts(num_experts, ep_size, ep_rank)
+    expert_map = torch.full((num_experts,), fill_value=-1, dtype=torch.int32, device=device)
+    expert_map[start : start + count] = torch.arange(count, dtype=torch.int32, device=device)
+    return expert_map
+
+
+def make_local_weights(
+    *,
+    hidden_size: int,
+    intermediate_size: int,
+    num_experts: int,
+    tp_size: int,
+    ep_size: int,
+    tp_rank: int,
+    ep_rank: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    inter_per_tp = intermediate_size // tp_size
+    num_local = local_num_experts(num_experts, ep_size, ep_rank)
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed + ep_rank * 10_000 + tp_rank)
+    w1 = torch.randn(
+        (num_local, 2 * inter_per_tp, hidden_size),
+        generator=gen,
+        dtype=dtype,
+        device=device,
+    ) / math.sqrt(hidden_size)
+    w2 = torch.randn(
+        (num_local, hidden_size, inter_per_tp),
+        generator=gen,
+        dtype=dtype,
+        device=device,
+    ) / math.sqrt(inter_per_tp)
+    return w1.contiguous(), w2.contiguous()
+
+
+def collect_hardware_snapshot() -> dict[str, Any]:
+    commands = {
+        "nvidia_smi_L": ["nvidia-smi", "-L"],
+        "nvidia_smi_topo": ["nvidia-smi", "topo", "-m"],
+        "nvidia_smi_query": [
+            "nvidia-smi",
+            "--query-gpu=index,name,memory.total,driver_version,pci.bus_id",
+            "--format=csv,noheader",
+        ],
+        "ibv_devinfo": ["ibv_devinfo"],
+    }
+    out: dict[str, Any] = {"env": {k: os.environ[k] for k in sorted(os.environ) if k.startswith(("SLURM_", "CUDA", "NCCL", "VLLM", "MASTER_", "WORLD_SIZE", "RANK", "LOCAL_RANK"))}}
+    for name, cmd in commands.items():
+        try:
+            out[name] = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+        except Exception as exc:
+            out[name] = f"UNAVAILABLE: {exc}"
+    return out
+
+
+def _percentile(values: list[float], q: float) -> float:
+    if not values:
+        return float("nan")
+    xs = sorted(values)
+    idx = max(0, min(len(xs) - 1, int(round(q * (len(xs) - 1)))))
+    return float(xs[idx])
+
+
+def summarize_timings_ms(timings_ms: list[float]) -> dict[str, float]:
+    return {
+        "mean_ms": float(statistics.mean(timings_ms)),
+        "median_ms": float(statistics.median(timings_ms)),
+        "min_ms": float(min(timings_ms)),
+        "max_ms": float(max(timings_ms)),
+        "p05_ms": _percentile(timings_ms, 0.05),
+        "p95_ms": _percentile(timings_ms, 0.95),
+    }
+
+
+def profile_bucket_breakdown(
+    *,
+    cfg: StudyConfig,
+    cond: BenchmarkCondition,
+    env: DistributedEnv,
+    artifacts: KernelArtifacts,
+    kernel: Any,
+    mk_kwargs: dict[str, Any],
+    num_tokens_across_dp: torch.Tensor,
+) -> dict[str, Any] | None:
+    activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    from vllm.forward_context import set_forward_context
+
+    dist.barrier()
+    with vllm_config_context(artifacts.vllm_config):
+        with torch.no_grad():
+            with torch.profiler.profile(
+                activities=activities,
+                record_shapes=False,
+                with_stack=False,
+                acc_events=True,
+            ) as prof:
+                for _ in range(cfg.bucket_profile_iters):
+                    with set_forward_context(
+                        None,
+                        artifacts.vllm_config,
+                        num_tokens=cond.tokens,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                    ):
+                        torch.cuda.nvtx.range_push("moe_kernel_bucket_profile")
+                        _ = kernel.apply(**mk_kwargs)
+                        torch.cuda.nvtx.range_pop()
+            torch.cuda.synchronize()
+
+    raw_events = profiler_to_event_dicts(prof, full_events=cfg.bucket_full_events)
+    breakdown = categorize_dicts(raw_events)
+    local = {
+        "rank": env.rank,
+        "ep_rank": env.rank // cond.parallel.tp,
+        "tp_rank": env.rank % cond.parallel.tp,
+        "summary": breakdown.as_dict(),
+        "rows": breakdown_to_rows(breakdown),
+    }
+    gathered: list[dict[str, Any] | None] = [None for _ in range(env.world_size)]
+    dist.all_gather_object(gathered, local)
+    if env.rank != 0:
+        return None
+
+    per_rank = [x for x in gathered if x is not None]
+    max_rank_bucket_us = {bucket: max(float(rank_payload["summary"]["per_bucket_us"].get(bucket, 0.0)) for rank_payload in per_rank) for bucket in breakdown.as_dict()["per_bucket_us"].keys()}
+    mean_rank_bucket_us = {bucket: float(statistics.mean(float(rank_payload["summary"]["per_bucket_us"].get(bucket, 0.0)) for rank_payload in per_rank)) for bucket in breakdown.as_dict()["per_bucket_us"].keys()}
+
+    return {
+        "condition": {
+            "shape": cond.shape.name,
+            "mode": cond.mode,
+            "tp": cond.parallel.tp,
+            "ep": cond.parallel.ep,
+            "tokens": cond.tokens,
+            "alpha": cond.alpha,
+        },
+        "profile_iters": cfg.bucket_profile_iters,
+        "per_rank": per_rank,
+        "max_rank_bucket_us": max_rank_bucket_us,
+        "mean_rank_bucket_us": mean_rank_bucket_us,
+    }
+
+
+def _kernel_call_kwargs(
+    *,
+    kernel: Any,
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    global_num_experts: int,
+    apply_router_weight_on_input: bool,
+) -> dict[str, Any]:
+    kwargs = {
+        "hidden_states": hidden_states,
+        "w1": w1,
+        "w2": w2,
+        "topk_weights": topk_weights,
+        "topk_ids": topk_ids,
+        "expert_map": expert_map,
+        "global_num_experts": global_num_experts,
+        "apply_router_weight_on_input": apply_router_weight_on_input,
+    }
+    sig = None
+    for attr in ("apply", "forward", "__call__"):
+        if hasattr(kernel, attr):
+            try:
+                sig = getattr(kernel, attr)
+                break
+            except Exception:
+                pass
+    if sig is not None:
+        import inspect
+
+        params = inspect.signature(sig).parameters
+        if "activation" in params:
+            kwargs["activation"] = "silu"
+        if "inplace" in params:
+            kwargs["inplace"] = False
+    return kwargs
+
+
+def run_condition(
+    *,
+    cfg: StudyConfig,
+    cond: BenchmarkCondition,
+    env: DistributedEnv,
+    artifacts: KernelArtifacts,
+    out_dir: Path,
+) -> dict[str, Any] | None:
+    device = torch.device("cuda", torch.cuda.current_device())
+    ep_rank, tp_rank = rank_geometry(env.rank, cond.parallel.tp)
+    dtype = dtype_from_name(cond.shape.dtype)
+
+    hidden_gen = torch.Generator(device=device)
+    hidden_gen.manual_seed(cfg.seed + cond.tokens + int(cond.alpha * 1000) + env.rank)
+    hidden_states = torch.randn(
+        (cond.tokens, cond.shape.hidden_size),
+        generator=hidden_gen,
+        device=device,
+        dtype=dtype,
+    ) / math.sqrt(cond.shape.hidden_size)
+
+    expert_map = make_expert_map(cond.shape.num_experts, cond.parallel.ep, ep_rank, device)
+    w1, w2 = make_local_weights(
+        hidden_size=cond.shape.hidden_size,
+        intermediate_size=cond.shape.intermediate_size,
+        num_experts=cond.shape.num_experts,
+        tp_size=cond.parallel.tp,
+        ep_size=cond.parallel.ep,
+        tp_rank=tp_rank,
+        ep_rank=ep_rank,
+        dtype=dtype,
+        device=device,
+        seed=cfg.seed + 13,
+    )
+
+    routing = make_routing_batch(
+        num_tokens=cond.tokens,
+        num_experts=cond.shape.num_experts,
+        topk=cond.shape.topk,
+        alpha=cond.alpha,
+        hot_expert_count=cfg.hot_expert_count,
+        device=device,
+        seed=cfg.seed + 17,
+        weight_mode=cfg.routing_weight_mode,
+        topk_index_dtype=artifacts.topk_index_dtype,
+    )
+
+    num_tokens_across_dp = torch.tensor([cond.tokens] * cond.parallel.ep, device=device, dtype=torch.int32)
+    from vllm.forward_context import set_forward_context
+
+    kernel = artifacts.kernel
+    mk_kwargs = _kernel_call_kwargs(
+        kernel=kernel,
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=routing.topk_weights,
+        topk_ids=routing.topk_ids,
+        expert_map=expert_map,
+        global_num_experts=cond.shape.num_experts,
+        apply_router_weight_on_input=cfg.apply_router_weight_on_input,
+    )
+
+    dist.barrier()
+    with vllm_config_context(artifacts.vllm_config):
+        with set_forward_context(
+            None,
+            artifacts.vllm_config,
+            num_tokens=cond.tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
+            for _ in range(cfg.warmup_iters):
+                torch.cuda.nvtx.range_push("moe_kernel_warmup")
+                _ = kernel.apply(**mk_kwargs)
+                torch.cuda.nvtx.range_pop()
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    timings_ms: list[float] = []
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    with vllm_config_context(artifacts.vllm_config):
+        for _ in range(cfg.measure_iters):
+            with set_forward_context(
+                None,
+                artifacts.vllm_config,
+                num_tokens=cond.tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+            ):
+                torch.cuda.nvtx.range_push("moe_kernel_timed")
+                start_event.record()
+                _ = kernel.apply(**mk_kwargs)
+                end_event.record()
+                torch.cuda.nvtx.range_pop()
+                end_event.synchronize()
+                timings_ms.append(float(start_event.elapsed_time(end_event)))
+
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    bucket_profile = None
+    if cfg.collect_buckets:
+        bucket_profile = profile_bucket_breakdown(
+            cfg=cfg,
+            cond=cond,
+            env=env,
+            artifacts=artifacts,
+            kernel=kernel,
+            mk_kwargs=mk_kwargs,
+            num_tokens_across_dp=num_tokens_across_dp,
+        )
+
+    local_summary = summarize_timings_ms(timings_ms)
+    local_payload = {
+        "rank": env.rank,
+        "local_rank": env.local_rank,
+        "ep_rank": ep_rank,
+        "tp_rank": tp_rank,
+        "timings_ms": timings_ms,
+        **local_summary,
+    }
+
+    gathered: list[dict[str, Any] | None] = [None for _ in range(env.world_size)]
+    dist.all_gather_object(gathered, local_payload)
+    if env.rank != 0:
+        return None
+
+    per_rank = [item for item in gathered if item is not None]
+    rank_medians = [float(item["median_ms"]) for item in per_rank]
+    rank_means = [float(item["mean_ms"]) for item in per_rank]
+
+    summary = {
+        "study_name": cfg.study_name,
+        "shape": cond.shape.name,
+        "mode": cond.mode,
+        "tp": cond.parallel.tp,
+        "ep": cond.parallel.ep,
+        "world_size": cond.parallel.world_size,
+        "tokens": cond.tokens,
+        "alpha_requested": cond.alpha,
+        "alpha_observed": routing.stats.observed_alpha,
+        "backend": cfg.all2all_backend,
+        "dtype": cond.shape.dtype,
+        "hidden_size": cond.shape.hidden_size,
+        "intermediate_size": cond.shape.intermediate_size,
+        "num_experts": cond.shape.num_experts,
+        "topk": cond.shape.topk,
+        "warmup_iters": cfg.warmup_iters,
+        "measure_iters": cfg.measure_iters,
+        "latency_median_ms_max_rank": max(rank_medians),
+        "latency_mean_ms_max_rank": max(rank_means),
+        "latency_median_ms_mean_across_ranks": float(statistics.mean(rank_medians)),
+        "latency_mean_ms_mean_across_ranks": float(statistics.mean(rank_means)),
+        "per_rank": per_rank,
+        "routing_counts": routing.stats.counts,
+        "routing_probabilities": routing.stats.probabilities,
+    }
+
+    stem = f"{cond.shape.name}-{cond.mode}-tp{cond.parallel.tp}-ep{cond.parallel.ep}-tok{cond.tokens}-alpha{cond.alpha:.3f}"
+    rank_dir = ensure_dir(out_dir / "per_rank")
+    rank_path = rank_dir / f"{stem}.json"
+    write_json(rank_path, summary)
+
+    bucket_path = None
+    if bucket_profile is not None:
+        bucket_dir = ensure_dir(out_dir / "bucket_profiles")
+        bucket_path = bucket_dir / f"{stem}.json"
+        write_json(bucket_path, bucket_profile)
+
+    row = {k: v for k, v in summary.items() if k not in {"per_rank", "routing_counts", "routing_probabilities"}}
+    row["per_rank_path"] = str(rank_path)
+    row["bucket_profile_path"] = str(bucket_path) if bucket_path is not None else ""
+    if bucket_profile is not None:
+        for bucket, value in bucket_profile["max_rank_bucket_us"].items():
+            row[f"bucket_max_rank_{bucket}_ms"] = float(value) / 1000.0
+        for bucket, value in bucket_profile["mean_rank_bucket_us"].items():
+            row[f"bucket_mean_rank_{bucket}_ms"] = float(value) / 1000.0
+    return row
+
+
+def run_parallel_point(
+    *,
+    cfg: StudyConfig,
+    parallel_tp: int,
+    parallel_ep: int,
+    env: DistributedEnv,
+    out_dir: Path,
+) -> None:
+    out_dir = ensure_dir(out_dir)
+
+    if env.rank == 0:
+        write_json(out_dir / "hardware.json", collect_hardware_snapshot())
+        write_json(out_dir / "study_config.json", {
+            "study_config": asdict(cfg),
+            "tp": parallel_tp,
+            "ep": parallel_ep,
+        })
+
+    rows: list[dict[str, Any]] = []
+    from .config import ParallelPoint, make_conditions
+
+    parallel = ParallelPoint(tp=parallel_tp, ep=parallel_ep)
+    conditions = make_conditions(cfg, parallel)
+    dtype_name = cfg.kernel_shapes[0].dtype
+
+    for shape in cfg.kernel_shapes:
+        if shape.intermediate_size % parallel.tp != 0:
+            raise ValueError(
+                f"Shape {shape.name}: intermediate_size={shape.intermediate_size} must be divisible by tp={parallel.tp}."
+            )
+        if shape.num_experts < parallel.ep:
+            raise ValueError(
+                f"Shape {shape.name}: num_experts={shape.num_experts} must be >= ep={parallel.ep}."
+            )
+
+    artifacts_by_shape: dict[str, KernelArtifacts] = {}
+    for shape in cfg.kernel_shapes:
+        ep_rank, _ = rank_geometry(env.rank, parallel.tp)
+        artifacts_by_shape[shape.name] = build_kernel_artifacts(
+            shape_name=shape.name,
+            hidden_size=shape.hidden_size,
+            intermediate_size=shape.intermediate_size,
+            num_experts=shape.num_experts,
+            num_local_experts=local_num_experts(shape.num_experts, parallel.ep, ep_rank),
+            topk=shape.topk,
+            dtype=dtype_from_name(shape.dtype),
+            max_num_tokens=next_power_of_two(cfg.max_tokens()),
+            all2all_backend=cfg.all2all_backend,
+            ep_size=parallel.ep,
+        )
+
+    if env.rank == 0:
+        print(f"[study] {cfg.study_name} :: tp={parallel.tp} ep={parallel.ep} :: {len(conditions)} conditions")
+        print(f"[study] backend={cfg.all2all_backend} dtype={dtype_name} out_dir={out_dir}")
+
+    for cond in conditions:
+        if env.rank == 0:
+            print(
+                f"[cond] shape={cond.shape.name} mode={cond.mode} tp={cond.parallel.tp} ep={cond.parallel.ep} "
+                f"tokens={cond.tokens} alpha={cond.alpha}"
+            )
+        row = run_condition(cfg=cfg, cond=cond, env=env, artifacts=artifacts_by_shape[cond.shape.name], out_dir=out_dir)
+        if env.rank == 0 and row is not None:
+            rows.append(row)
+            append_jsonl(out_dir / "results.jsonl", row)
+
+    if env.rank == 0:
+        write_csv(out_dir / "results.csv", rows)
+        write_json(out_dir / "results_summary.json", {"rows": rows, "num_rows": len(rows)})

@@ -1,312 +1,441 @@
-# moe-breakdown
+# fused-moe-kernel-study
 
-Execution-time breakdown for mixture-of-experts (MoE) models.
+A direct **MoE kernel sweep** benchmark suite for the characterization study you described.
 
-> **See [RUNNING.md](RUNNING.md) for generic Docker / Slurm
-> instructions.**  For PACE-ICE (Georgia Tech) specifically, see
-> [RUNNING-ICE.md](RUNNING-ICE.md).  This README focuses on what the
-> framework does and why.
+## Scope
 
-Given any MoE forward pass — Mixtral, Qwen-MoE, DeepSeek-MoE, DBRX, OLMoE,
-custom, or a quantized checkpoint — `moe-breakdown` runs the model under
-`torch.profiler`, categorizes every Kineto event into one of **nine buckets**
-that explain where wall-clock time actually goes, and produces a chart +
-JSON + CSV report bundle.
+This suite measures **only** the fused MoE kernel path.
 
-```
-   bucket              %     time(ms)   count
-   -------------------------------------------------------
-   cpu_native         99.5%     14.863       32   ##################################################  (CPU — Native)
-   allocator           0.4%      0.057        1     (Allocator)
-   gpu_idle_sync       0.1%      0.020        1     (GPU Idle — sync)
-```
+It does **not** use:
 
-A single `breakdown.png` chart is also generated, with three panels:
+- tokenizer
+- vLLM serving pipeline
+- request scheduler
+- attention
+- KV cache
+- full-model forward passes
 
-* **(a)** Time-share by bucket (horizontal bar, sorted by %)
-* **(b)** Absolute time per bucket (stacked bar)
-* **(c)** Top events per bucket (which kernels dominate each bucket)
+It **does** use the vLLM fused-MoE kernel library as the implementation under test.
+That is an important distinction:
 
-## Buckets
+- **not** vLLM serving
+- **yes** direct invocation of the fused MoE kernel implementation
 
-| Bucket | What it captures |
-|---|---|
-| `cpu_python` | Python interpreter, dispatcher, autograd traversal |
-| `cpu_native` | Native CPU ops (aten on CPU thread, tokenize, sample, data prep) |
-| `gpu_compute` | Compute-bound GPU kernels (matmul, gemm, conv, attention) |
-| `gpu_memory` | Memory-bound GPU kernels (norm, softmax, MoE dispatch) |
-| `gpu_idle_gap` | Wall-clock gap between consecutive GPU kernels (CPU dispatch latency) |
-| `gpu_idle_sync` | Explicit GPU sync stalls (`cudaStreamSynchronize`, `.item()`, `.cpu()`) |
-| `network` | Collective communication (NCCL AllToAll / AllReduce / AllGather) |
-| `mem_transfer` | DMA copies (H2D / D2H / D2D / memset) |
-| `allocator` | CUDA caching allocator work (`cudaMalloc`, `cudaFree`, `aten::empty`) |
+Each timed region is a CUDA-event bracket around the kernel call itself.
 
-The categorisation is heuristic but explicit — every rule is a regex in
-[`src/moe_breakdown/categorize.py`](src/moe_breakdown/categorize.py) and
-you can read or extend it.  Unit tests in
-[`tests/test_categorize.py`](tests/test_categorize.py) verify each bucket.
+## Sweep knobs
 
-## Quick start
+The suite is built around the three knobs from your study:
 
-### 1. The tiny in-tree model — runs anywhere, no GPU needed
+1. routing imbalance ratio `alpha`
+2. number of tokens
+3. TP / EP degree
 
-A 3.7 M-parameter MoE (3 experts × ~1 M each, top-1 routing) defined in
-[`src/moe_breakdown/models/tiny_moe.py`](src/moe_breakdown/models/tiny_moe.py):
+across **two representative kernel shapes**.
 
-```bash
-cd moe-breakdown
-PYTHONPATH=src python3 scripts/run_breakdown.py --backend tiny --out runs/tiny-moe-cpu
-# or, with a config file:
-PYTHONPATH=src python3 scripts/run_breakdown.py \
-    --backend tiny --config configs/tiny.yaml --passes 20
-```
+## High-level design
 
-Useful when:
-* You want to verify the framework end-to-end without a checkpoint download.
-* You're developing new categoriser rules and want a known-input to test against.
-* You're teaching / demoing — this is what I ran for the demo above.
+A different `(tp, ep)` point implies a different distributed layout, so TP/EP is handled as **one separate distributed job per point**.
 
-### 2. Any HuggingFace MoE model — needs a GPU
+Inside each job, the suite sweeps:
 
-```bash
-# local
-PYTHONPATH=src python3 scripts/run_breakdown.py \
-    --backend transformers \
-    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
-    --tokens 32 --passes 3 --out runs/mixtral
+- token count
+- routing imbalance `alpha`
+- kernel shape
 
-# docker
-docker build -t moe-breakdown .
-docker run --rm --gpus all -v $PWD/runs:/runs moe-breakdown \
-    --backend transformers \
-    --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
-    --tokens 32 --passes 3 --out /runs/mixtral
+That gives you a clean study structure:
 
-# docker-compose
-docker compose run --rm mixtral-8x7b
-docker compose run --rm qwen-moe
-docker compose run --rm deepseek-moe
-```
+- outer sweep: TP/EP job grid
+- inner sweep: tokens × alpha × shape
 
-### 2c. Expert placement / topology analysis
+## Python API
 
-For a MoE model deployed across multiple GPUs, the dominant systems
-question is: **which experts live on which GPU?**  AllToAll dispatch
-time scales with the number of cross-rack transfers, so a good
-placement can save a lot of network time.
-
-```bash
-PYTHONPATH=src python3 scripts/run_breakdown.py \
-    --backend synthetic \
-    --topology \
-    --num-experts 100 \
-    --num-racks 2 --gpus-per-rack 8 \
-    --out runs/100-experts-topology
-```
-
-Output:
-
-```
-   total transfer TIME :  687.19 ms
-   total transfer DATA :    2.00 GB  (2,147,480,256 bytes)
-
-   strategy         intra(ms)  inter(ms)  total(ms)
-   round-robin        37.10     343.59     380.69
-   greedy             36.68     346.93     383.61
-   cluster            79.77       2.21      81.98     <-- 4.6x faster
-```
-
-Five extra artifacts per topology run, all in `runs/<name>/`:
-
-* `transfer_matrix_time.png`   - N x N heatmap of transfer **time** (us)
-* `transfer_matrix_bytes.png`  - N x N heatmap of transfer **data volume** (bytes)
-* `topology.png`               - experts laid out on GPUs, edges coloured by
-                                intra-rack (green) vs inter-rack (red) traffic
-* `placement_comparison.png`   - horizontal bars comparing each strategy
-* `placement.json`             - explicit expert -> GPU mapping per strategy
-
-Both heatmaps use the same N x N layout so you can compare them
-side-by-side: a placement that reduces *time* but not *bytes* is
-suspicious (link already saturated); a placement that reduces *bytes*
-but not *time* is suspicious (per-message overhead dominates).
-
-### 2b. Hybrid mode — populate all 9 buckets even on CPU
-
-When you run on CPU the GPU-specific buckets (`gpu_compute`, `gpu_memory`,
-`network`, etc.) will be empty because the hardware doesn't exercise those
-paths.  Add `--hybrid` to layer a *synthetic GPU projection* on top of the
-real CPU run, calibrated to your model's actual architecture.  The chart
-then shows all 9 buckets and you can see where the time *would* go on GPU.
-
-```bash
-PYTHONPATH=src python3 scripts/run_breakdown.py \
-    --backend transformers \
-    --model yujiepan/phi-moe-tiny-random \
-    --passes 3 \
-    --hybrid \
-    --out runs/yujiepan-hybrid
-```
-
-Output:
-```
-   bucket              %     time(ms)   count
-   cpu_python           1.0%      1.500        7     (CPU — Python)
-   cpu_native          17.0%     26.013       93     (CPU — Native)
-   gpu_compute         56.2%     85.970       30     (GPU Compute)
-   gpu_memory           3.9%      5.953        5     (GPU Memory-bound)
-   gpu_idle_gap         0.6%      0.864        2     (GPU Idle — gap)
-   gpu_idle_sync        4.8%      7.316        2     (GPU Idle — sync)
-   network              8.9%     13.640        4     (Network)
-   mem_transfer         4.1%      6.327        3     (Mem Transfer (DMA))
-   allocator            3.5%      5.356        7     (Allocator)
-```
-
-Every event in `events.jsonl` is tagged `"synthetic": true|false` so you
-can filter out the projection when you only want real CPU data.
-
-> **Note:** the GPU-side numbers in hybrid mode are a calibrated
-> *projection*, not measured GPU runs.  They are based on the model's
-> expert count, FFN size, and routing pattern, with plausible time
-> fractions.  For ground-truth GPU numbers, run on a real GPU box.
-
-### 3. A running vLLM server
-
-```bash
-docker run --rm --network host moe-breakdown \
-    --backend vllm --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
-    --base-url http://localhost:8000 --passes 10 --out /runs/vllm
-```
-
-### 4. Quantized Qwen (4-bit / 8-bit)
-
-```bash
-pip install -e ".[hf]" bitsandbytes accelerate
-
-python3 examples/run_quantized_qwen.py \
-    --model Qwen/Qwen1.5-MoE-A2.7B --bits 4
-```
-
-### 5. Your own model
-
-See [`examples/run_my_own_model.py`](examples/run_my_own_model.py).  Five-line template:
+The package root now exposes the benchmark API directly:
 
 ```python
-model = MyModel(...).eval()
-with torch.no_grad():
-    with torch.profiler.profile(activities=[...], acc_events=True) as prof:
-        model(input)
-
-from moe_breakdown import categorize, render_chart
-render_chart(categorize(prof), title="My Model", out_path="breakdown.png")
+from fused_moe_kernel_study import (
+    MoEKernelConfig,
+    KernelMeasurement,
+    measure_moe_kernel_latency,
+    run_sweep,
+)
 ```
 
-### 6. Slurm cluster
+## Georgia Tech PACE notes
 
-```bash
-sbatch examples/run_slurm.sbatch
+This repo now includes a PACE-oriented config:
 
-# Override the model via env var:
-sbatch --export=ALL,MODEL="Qwen/Qwen1.5-MoE-A2.7B",TOKENS=64,PASSES=3 \
-    examples/run_slurm.sbatch
-```
+- `configs/study.pace.a100.yaml`
 
-The Slurm script handles module loading, scratch directories, and HF cache
-isolation per job.  Outputs land in `$SCRATCH/moe-breakdown/$SLURM_JOB_ID/`.
+and a `uv` bootstrap flow inside the Slurm launch path.
 
-For multi-node MoE profiling, the framework is rank-agnostic — each rank
-profiles its own slice, and you gather results with `torch.distributed.gather`
-into rank 0.  Wrap it as needed; the categorizer doesn't care.
+The expectation is that you run this from scratch storage, e.g.:
 
-## Reproducibility
+- repo: `~/scratch/fused-moe-kernel-study`
+- env: `~/scratch/fused-moe-kernel-study-venv`
 
-Every run writes a self-contained artifact bundle:
+The example config assumes:
 
-```
-runs/<name>/
-├── breakdown.png      # the chart
-├── breakdown.json     # full structured report
-├── breakdown.csv      # bucket-level table (one row per bucket)
-└── events.jsonl       # every categorized event, one per line
-```
+- `qos: coc-ice`
+- `cuda/12.4`
+- `python/3.11`
+- `gcc/12.3.0`
+- A100 nodes requested with `--gres=gpu:a100:N`
 
-The CSV is designed to be diff-friendly: compare `breakdown.csv` from two
-runs of the same model with different batch sizes / TP sizes / sequence
-lengths to see exactly where the extra time went.
-
-## Backends summary
-
-| Backend | What it profiles | Use case |
-|---|---|---|
-| `tiny` | A 3.7 M-parameter in-tree MoE under `torch.profiler` | Local smoke test, demo, regression tests |
-| `transformers` | Any HuggingFace MoE model under `torch.profiler` | Local benchmarking, ablations |
-| `vllm` | A running vLLM server (in-process or remote) | Production serving diagnosis |
-| `synthetic` | A synthetic MoE-shaped trace with configurable fractions | CI / testing the categorizer itself |
-
-### Environment knobs
-
-```bash
-# Enable per-instance event capture (slower but enables gpu_idle_gap detection)
-MOE_BREAKDOWN_FULL_EVENTS=1 moe-breakdown --backend transformers --model ...
-```
-
-## How the categorisation works
-
-Each event has `(name, category, device)`.  We lower-case the name and
-match against nine compiled regex tables, in priority order:
-
-1. **Sync** — `cudastreamsynchronize`, `aten::item`, `aten::cpu` → `gpu_idle_sync`
-2. **Network** — `cat == "communication"` or matches `*all_to_all*`, `*all_reduce*` → `network`
-3. **Allocator** — `cudamalloc`, `caching_allocator`, `aten::empty` → `allocator`
-4. **Memcpy** — `cat in {memcpy, memset, gpu_memcpy}` or `*memcpy*` → `mem_transfer`
-5. **CUDA runtime** — `cat == "cuda_runtime"` → `cpu_native`
-6. **CPU** — `device == "cpu"` → `cpu_native` (or `cpu_python` if name matches Python/dispatcher patterns)
-7. **GPU kernel** — match against compute-bound (gemm, attention, conv…) or memory-bound (norm, softmax, MoE dispatch…) patterns; unknown kernel defaults to `gpu_compute`
-
-GPU **idle gaps** are not an event — they are the wall-clock gap between
-consecutive GPU events on the same stream.  Detected when events have
-`start_us`/`end_us` fields.  Set `MOE_BREAKDOWN_FULL_EVENTS=1` for the
-transformers / tiny backends to get them.
-
-## Tests
-
-```bash
-python tests/test_categorize.py
-```
-
-14 tests covering every bucket plus the gap detector.
+If you are using PACE nodes with A100s, the cards are typically **40 GB or 80 GB**, not 60 GB. The benchmark itself does not assume either capacity, except that larger token grids and larger EP points are easier on 80 GB cards.
 
 ## File layout
 
-```
-moe-breakdown/
-├── src/moe_breakdown/
-│   ├── categorize.py          # the 9-bucket regex rules + gap detector
-│   ├── chart.py               # 3-panel chart
-│   ├── report.py              # JSON + CSV writer
-│   ├── models/
-│   │   └── tiny_moe.py        # the in-tree 3.7 M-param MoE
-│   └── backends/
-│       ├── tiny.py            # tiny backend
-│       ├── transformers.py    # HF transformers backend
-│       ├── vllm.py            # vLLM backend (remote or in-process)
-│       └── synthetic.py       # synthetic events
+```text
+fused-moe-kernel-study/
 ├── configs/
-│   ├── tiny.yaml
-│   ├── mixtral-8x7b.yaml
-│   ├── qwen-moe.yaml
-│   └── deepseek-moe.yaml
-├── scripts/run_breakdown.py   # CLI entrypoint
-├── examples/
-│   ├── run_slurm.sbatch       # Slurm batch script
-│   ├── run_quantized_qwen.py  # quantized Qwen template
-│   └── run_my_own_model.py    # 5-line "drop in your model" template
-├── tests/test_categorize.py
-├── runs/                      # all run output goes here (gitignored)
-├── Dockerfile
-├── docker-compose.yml
-└── pyproject.toml
+│   ├── study.example.yaml
+│   └── study.pace.a100.yaml
+├── scripts/
+│   ├── bootstrap_uv_env.sh
+│   ├── run_direct_moe_sweep.py
+│   ├── submit_slurm_study.py
+│   ├── aggregate_results.py
+│   └── dump_topology.py
+├── slurm/
+│   └── run_direct_moe_sweep.sbatch
+└── src/fused_moe_kernel_study/
+    ├── config.py
+    ├── distributed.py
+    ├── reporting.py
+    ├── routing.py
+    ├── runner.py
+    └── vllm_adapter.py
 ```
 
-## License
+## What gets measured
 
-MIT
+For each condition, the suite constructs:
+
+- synthetic `hidden_states`
+- synthetic `w1` / `w2` expert weights
+- synthetic `topk_ids`
+- synthetic `topk_weights`
+- per-rank `expert_map`
+
+Then it invokes the fused MoE kernel directly and records two kinds of measurements:
+
+### 1. Primary latency measurement
+
+CUDA-event timing around the kernel call itself:
+
+- warmup iterations
+- measured iterations
+- per-rank timing vectors in milliseconds
+- max-rank median latency
+- max-rank mean latency
+- mean latency across ranks
+- observed routing imbalance from realized assignments
+
+### 2. Optional bucket profiling
+
+If `collect_buckets: true`, the suite also runs a short `torch.profiler` pass for each condition and categorizes events into buckets similar to the earlier `moe-breakdown` framework:
+
+- `cpu_python`
+- `cpu_native`
+- `gpu_compute`
+- `gpu_memory`
+- `gpu_idle_gap`
+- `gpu_idle_sync`
+- `network`
+- `mem_transfer`
+- `allocator`
+
+These bucket profiles are written separately from the main latency measurements.
+
+## Inter-GPU communication behavior
+
+Yes: when `ep > 1` and the selected all-to-all backend is an EP-capable backend such as `deepep_low_latency`, the direct kernel path is expected to dispatch tokens to experts hosted on other ranks and then combine the results back.
+
+That means the benchmark is intended to exercise the same **expert-parallel communication path inside the fused MoE kernel backend itself**, without the rest of the serving stack.
+
+Important nuance:
+
+- `ep = 1` -> no cross-rank expert dispatch, so the `network` bucket should be near zero or absent
+- `ep > 1` -> the backend may issue NCCL / all-to-all style communication internally during prepare/finalize
+
+## Routing model
+
+The gating network is bypassed entirely.
+
+Instead, routing is generated directly.
+A simple hot-expert distribution is used:
+
+- `alpha = 1.0` -> balanced / uniform
+- `alpha > 1.0` -> the first `hot_expert_count` experts are proportionally hotter
+
+The suite records both:
+
+- `alpha_requested`
+- `alpha_observed`
+
+so you can see how the sampled routing matched the intended imbalance.
+
+## uv-based environment setup
+
+The Slurm path supports **automatic `uv` environment bootstrap**.
+
+If `uv_env_dir` is set in the YAML config, the sbatch script will:
+
+1. load requested modules
+2. create the env with `uv venv` if needed
+3. install the local package with `uv pip install -e .`
+4. optionally install a vLLM spec if `VLLM_SPEC` is set in the environment
+
+The helper script is:
+
+```bash
+scripts/bootstrap_uv_env.sh
+```
+
+## Qwen3-30B-A3B initial scripts
+
+I added an initial smoke-study config and profile scripts for Qwen3-30B-A3B:
+
+- `configs/study.qwen3_30b_a3b.initial.yaml`
+- `scripts/submit_qwen3_30b_a3b_initial.sh`
+- `scripts/profile_qwen3_30b_a3b_two_conditions.sh`
+- `slurm/profile_qwen3_30b_a3b_two_conditions.sbatch`
+
+## PACE quick start
+
+### 1. Put the repo in scratch
+
+```bash
+cd ~/scratch
+git clone <your-repo-url> fused-moe-kernel-study
+cd fused-moe-kernel-study
+```
+
+### 2. Edit the PACE config
+
+Start from:
+
+```bash
+cp configs/study.pace.a100.yaml configs/study.pace.local.yaml
+```
+
+Then update at least:
+
+- `kernel_shapes`
+- `parallel_points`
+- `workdir`
+- `uv_env_dir`
+- `time`
+- `mem`
+
+### 3. Dry-run submission
+
+```bash
+python3 scripts/submit_slurm_study.py \
+  --config configs/study.pace.local.yaml \
+  --dry-run
+```
+
+### 4. Submit the study
+
+```bash
+export VLLM_SPEC='vllm'
+python3 scripts/submit_slurm_study.py \
+  --config configs/study.pace.local.yaml
+```
+
+If you need a particular version, set for example:
+
+```bash
+export VLLM_SPEC='vllm==0.10.2'
+```
+
+or a source checkout / wheel path appropriate for your environment.
+
+## Local / interactive run
+
+For a fixed point such as `tp=1, ep=4`:
+
+```bash
+cd fused-moe-kernel-study
+PYTHONPATH=src torchrun --nproc-per-node=4 \
+  scripts/run_direct_moe_sweep.py \
+  --config configs/study.example.yaml \
+  --tp-size 1 \
+  --ep-size 4
+```
+
+## Aggregate results
+
+```bash
+python3 scripts/aggregate_results.py \
+  --study-root runs/fused-moe-characterization-pace-a100
+```
+
+## Output layout
+
+For a point like `tp=1, ep=4`, outputs go to:
+
+```text
+runs/<study_name>/tp1-ep4/
+├── hardware.json
+├── results.csv
+├── results.jsonl
+├── results_summary.json
+├── study_config.json
+├── per_rank/
+│   ├── mixtral_like-full_factorial-tp1-ep4-tok128-alpha1.000.json
+│   └── ...
+└── bucket_profiles/
+    ├── mixtral_like-full_factorial-tp1-ep4-tok128-alpha1.000.json
+    └── ...
+```
+
+`results.csv` includes both the main latency summary and, when bucket profiling is enabled, flattened bucket summaries such as:
+
+- `bucket_max_rank_network_ms`
+- `bucket_max_rank_gpu_compute_ms`
+- `bucket_mean_rank_mem_transfer_ms`
+- etc.
+
+## NCU / NSYS wrappers
+
+I added lightweight wrappers so you can profile **one specific condition** without changing the benchmark logic.
+
+### Single-condition runner
+
+Use:
+
+```bash
+scripts/run_one_condition.py
+```
+
+That script runs exactly one shape / token / alpha / TP / EP point and writes one JSON result.
+
+### NCU wrapper
+
+Use:
+
+```bash
+scripts/wrap_ncu.sh
+```
+
+Example under `srun` for a 4-rank EP job:
+
+```bash
+srun --ntasks=4 --gpus-per-task=1 \
+  bash scripts/wrap_ncu.sh \
+    python3 scripts/run_one_condition.py \
+      --shape-name mixtral_like \
+      --hidden-size 4096 \
+      --intermediate-size 14336 \
+      --num-experts 8 \
+      --topk 2 \
+      --tp-size 1 \
+      --ep-size 4 \
+      --num-tokens 1024 \
+      --alpha 4.0 \
+      --all2all-backend deepep_low_latency \
+      --collect-buckets \
+      --bucket-profile-iters 3 \
+      --bucket-full-events
+```
+
+Useful env vars:
+
+```bash
+export PROFILE_RANK=0
+export NCU_OUT_BASE=$PWD/ncu/mixtral-like-ep4
+export NCU_SET=full
+export NCU_EXTRA_ARGS='--nvtx --nvtx-include moe_kernel_timed'
+```
+
+### NSYS wrapper
+
+Use:
+
+```bash
+scripts/wrap_nsys.sh
+```
+
+Example:
+
+```bash
+srun --ntasks=4 --gpus-per-task=1 \
+  bash scripts/wrap_nsys.sh \
+    python3 scripts/run_one_condition.py \
+      --shape-name mixtral_like \
+      --hidden-size 4096 \
+      --intermediate-size 14336 \
+      --num-experts 8 \
+      --topk 2 \
+      --tp-size 1 \
+      --ep-size 4 \
+      --num-tokens 1024 \
+      --alpha 4.0 \
+      --all2all-backend deepep_low_latency
+```
+
+Useful env vars:
+
+```bash
+export PROFILE_RANK=0
+export NSYS_OUT_BASE=$PWD/nsys/mixtral-like-ep4
+export NSYS_TRACE='cuda,nvtx,osrt'
+export NSYS_EXTRA_ARGS='--capture-range=nvtx'
+```
+
+### Why wrappers instead of embedding NCU/NSYS in Python?
+
+Because `ncu` and `nsys` are external launchers. The wrapper approach lets:
+
+- all distributed ranks still participate
+- only one selected rank be profiled
+- the exact same Python benchmark code run under both normal and profiled modes
+
+The benchmark now emits NVTX ranges such as:
+
+- `moe_kernel_timed`
+- `moe_kernel_bucket_profile`
+- `moe_kernel_warmup`
+
+so you can use NVTX filters in NCU / NSYS.
+
+## Topology probe
+
+To inspect the node interconnect first:
+
+```bash
+python3 scripts/dump_topology.py
+```
+
+This writes:
+
+- `nvidia-smi topo -m`
+- NVLink status
+- PCI device listing
+- InfiniBand device info when present
+
+## Notes on vLLM compatibility
+
+vLLM's fused-MoE internals move around between versions.
+
+The compatibility layer is:
+
+- `src/fused_moe_kernel_study/vllm_adapter.py`
+
+That file already tries multiple constructor paths for:
+
+- `FusedMoEKernel` / `FusedMoEModularKernel`
+- `TritonExperts` / `TritonOrDeepGemmExperts`
+- `BatchedTritonExperts` / `BatchedTritonOrDeepGemmExperts`
+- different `FusedMoEConfig` signatures
+
+If your local vLLM checkout differs, that is the main file to patch.
+
+## Caveat
+
+This workspace does not have your real PACE GPU/vLLM environment, so I could not execute the real kernel path end-to-end here.
+
+What I did build is the benchmark suite structure, sweep logic, Slurm orchestration, `uv` bootstrap path, PACE-oriented config, and version-tolerant vLLM adapter layer so you can take it onto the cluster and finish the last mile against your exact installed vLLM build.

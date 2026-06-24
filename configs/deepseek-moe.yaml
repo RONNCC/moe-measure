@@ -1,8 +1,0 @@
-# DeepSeek-MoE-16B -- 64 routed experts + 2 shared experts.
-synthetic:
-  num_experts: 64
-  top_k: 6
-  hidden: 2048
-  ffn_hidden: 10944
-  tokens: 256
-model: deepseek-ai/deepseek-moe-16b-base
