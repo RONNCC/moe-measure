@@ -17,7 +17,8 @@ MODULES="${MODULES:-gcc/12.3.0 python/3.11 cuda/12.1.1}"
 PROFILE_TOOL="${PROFILE_TOOL:-nsys}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 
-cd "$WORKDIR"
+ROOT_DIR="$WORKDIR"
+cd "$ROOT_DIR"
 
 module purge || true
 if [[ -n "$MODULES" ]]; then
@@ -38,7 +39,7 @@ else
 fi
 
 if [[ -n "$UV_ENV_DIR" ]]; then
-  bash scripts/bootstrap_uv_env.sh "$UV_ENV_DIR"
+  bash "$ROOT_DIR/scripts/bootstrap_uv_env.sh" "$UV_ENV_DIR"
   VENV="$UV_ENV_DIR"
 fi
 
@@ -54,4 +55,4 @@ export PROFILE_TOOL
 # Active script uses up to 4 GPUs. If you uncomment the 8-GPU examples,
 # change #SBATCH --gres=gpu:a100:4 above to 8.
 
-bash scripts/profile_qwen3_30b_a3b_two_conditions.sh
+bash "$ROOT_DIR/scripts/profile_qwen3_30b_a3b_two_conditions.sh"

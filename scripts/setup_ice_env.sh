@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Pinned ICE defaults. Override via env vars only if you intentionally
 # want to change them.
 GCC_MODULE="${GCC_MODULE:-gcc/12.3.0}"
@@ -9,7 +12,7 @@ CUDA_MODULE="${CUDA_MODULE:-cuda/12.1.1}"
 UV_SPEC="${UV_SPEC:-uv}"
 VLLM_SPEC="${VLLM_SPEC:-vllm}"
 SKIP_VLLM="${SKIP_VLLM:-0}"
-WORKDIR="${WORKDIR:-$HOME/scratch/moe-breakdown}"
+WORKDIR="${WORKDIR:-$ROOT_DIR}"
 ENV_DIR="${ENV_DIR:-${TMPDIR:-$HOME/scratch}/moe-breakdown-venv}"
 UV_CACHE_DIR="${UV_CACHE_DIR:-${TMPDIR:-$HOME/scratch/.cache}/uv-cache}"
 HF_HOME="${HF_HOME:-${TMPDIR:-$HOME/scratch}/hf-cache}"
@@ -30,7 +33,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 export UV_CACHE_DIR HF_HOME HF_HUB_CACHE TRITON_CACHE_DIR TORCHINDUCTOR_CACHE_DIR VLLM_SPEC SKIP_VLLM
 
-bash scripts/bootstrap_uv_env.sh "$ENV_DIR"
+bash "$SCRIPT_DIR/bootstrap_uv_env.sh" "$ENV_DIR"
 # shellcheck disable=SC1090
 source "$ENV_DIR/bin/activate"
 

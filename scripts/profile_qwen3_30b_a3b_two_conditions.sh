@@ -15,7 +15,8 @@ set -euo pipefail
 #
 # On PACE, more common is to run this inside an interactive/batch allocation.
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 PROFILE_TOOL="${PROFILE_TOOL:-nsys}"
@@ -40,13 +41,13 @@ launch_condition() {
       export NCU_OUT_BASE="$out_dir/ncu"
       export NCU_SET="${NCU_SET:-full}"
       export NCU_EXTRA_ARGS="${NCU_EXTRA_ARGS:---nvtx --nvtx-include moe_kernel_timed}"
-      wrapper="bash scripts/wrap_ncu.sh"
+      wrapper="bash $ROOT_DIR/scripts/wrap_ncu.sh"
       ;;
     nsys)
       export NSYS_OUT_BASE="$out_dir/nsys"
       export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt}"
       export NSYS_EXTRA_ARGS="${NSYS_EXTRA_ARGS:---capture-range=nvtx}"
-      wrapper="bash scripts/wrap_nsys.sh"
+      wrapper="bash $ROOT_DIR/scripts/wrap_nsys.sh"
       ;;
     none)
       wrapper=""
@@ -59,7 +60,7 @@ launch_condition() {
 
   echo "[profile] label=$label tp=$tp ep=$ep tokens=$tokens alpha=$alpha tool=$PROFILE_TOOL"
 
-  local cmd="python3 scripts/run_one_condition.py \
+  local cmd="python3 $ROOT_DIR/scripts/run_one_condition.py \
     --shape-name qwen3_30b_a3b_moe \
     --hidden-size 2048 \
     --intermediate-size 768 \
@@ -89,7 +90,7 @@ launch_condition() {
     srun --ntasks="$world_size" --gpus-per-task=1 --cpus-per-task="${CPUS_PER_TASK:-8}" bash -lc "$cmd"
   else
     if [[ "$PROFILE_TOOL" == "none" ]]; then
-      torchrun --nproc-per-node="$world_size" python3 scripts/run_one_condition.py \
+      torchrun --nproc-per-node="$world_size" python3 "$ROOT_DIR/scripts/run_one_condition.py" \
         --shape-name qwen3_30b_a3b_moe \
         --hidden-size 2048 \
         --intermediate-size 768 \

@@ -23,7 +23,8 @@ MODULES="${MODULES:-}"
 OUT_DIR="${OUT_DIR:-}"
 UV_ENV_DIR="${UV_ENV_DIR:-${TMPDIR:-}/moe-breakdown-venv}"
 
-cd "$WORKDIR"
+ROOT_DIR="$WORKDIR"
+cd "$ROOT_DIR"
 
 module purge || true
 if [[ -n "$MODULES" ]]; then
@@ -44,7 +45,7 @@ else
 fi
 
 if [[ -n "$UV_ENV_DIR" ]]; then
-  bash scripts/bootstrap_uv_env.sh "$UV_ENV_DIR"
+  bash "$ROOT_DIR/scripts/bootstrap_uv_env.sh" "$UV_ENV_DIR"
   VENV="$UV_ENV_DIR"
 fi
 
@@ -80,4 +81,4 @@ srun \
   --ntasks="$WORLD_SIZE" \
   --gpus-per-task=1 \
   --cpus-per-task="$CPUS_PER_TASK" \
-  python3 scripts/run_direct_moe_sweep.py "${ARGS[@]}"
+  python3 "$ROOT_DIR/scripts/run_direct_moe_sweep.py" "${ARGS[@]}"

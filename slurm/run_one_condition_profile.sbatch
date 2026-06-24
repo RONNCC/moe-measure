@@ -18,7 +18,8 @@ VENV="${VENV:-}"
 MODULES="${MODULES:-}"
 UV_ENV_DIR="${UV_ENV_DIR:-}"
 
-cd "$WORKDIR"
+ROOT_DIR="$WORKDIR"
+cd "$ROOT_DIR"
 
 module purge || true
 if [[ -n "$MODULES" ]]; then
@@ -29,7 +30,7 @@ fi
 if [[ -n "$UV_ENV_DIR" ]]; then
   export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/scratch/.cache/uv}"
   mkdir -p "$UV_CACHE_DIR"
-  bash scripts/bootstrap_uv_env.sh "$UV_ENV_DIR"
+  bash "$ROOT_DIR/scripts/bootstrap_uv_env.sh" "$UV_ENV_DIR"
   VENV="$UV_ENV_DIR"
 fi
 
@@ -49,10 +50,10 @@ fi
 
 case "$PROFILE_TOOL" in
   ncu)
-    WRAPPER="bash scripts/wrap_ncu.sh"
+    WRAPPER="bash $ROOT_DIR/scripts/wrap_ncu.sh"
     ;;
   nsys)
-    WRAPPER="bash scripts/wrap_nsys.sh"
+    WRAPPER="bash $ROOT_DIR/scripts/wrap_nsys.sh"
     ;;
   none)
     WRAPPER=""
@@ -63,7 +64,7 @@ case "$PROFILE_TOOL" in
     ;;
 esac
 
-COMMAND="python3 scripts/run_one_condition.py $CONDITION_ARGS"
+COMMAND="python3 $ROOT_DIR/scripts/run_one_condition.py $CONDITION_ARGS"
 if [[ -n "$WRAPPER" ]]; then
   COMMAND="$WRAPPER $COMMAND"
 fi
