@@ -17,7 +17,7 @@ from .config import BenchmarkCondition, StudyConfig
 from .distributed import DistributedEnv
 from .reporting import append_jsonl, ensure_dir, write_csv, write_json
 from .routing import make_routing_batch
-from .vllm_adapter import KernelArtifacts, build_kernel_artifacts, vllm_config_context
+from .vllm_adapter import KernelArtifacts, build_kernel_artifacts, sp_local_sizes_context, vllm_config_context
 
 
 def dtype_from_name(name: str) -> torch.dtype:
@@ -170,12 +170,7 @@ def profile_bucket_breakdown(
                         num_tokens=cond.tokens,
                         num_tokens_across_dp=num_tokens_across_dp,
                     ):
-                        from contextlib import nullcontext
-                        from vllm.forward_context import get_forward_context
-                        _fctx = get_forward_context()
-                        _sp_ctx = (_fctx.dp_metadata.sp_local_sizes(1)
-                                   if _fctx.dp_metadata is not None else nullcontext())
-                        with _sp_ctx:
+                        with sp_local_sizes_context():
                             torch.cuda.nvtx.range_push("moe_kernel_bucket_profile")
                             _ = kernel.apply(**mk_kwargs)
                             torch.cuda.nvtx.range_pop()
@@ -203,6 +198,7 @@ def profile_bucket_breakdown(
         "condition": {
             "shape": cond.shape.name,
             "mode": cond.mode,
+            "routing_mode": cond.routing_mode,
             "tp": cond.parallel.tp,
             "ep": cond.parallel.ep,
             "tokens": cond.tokens,
@@ -226,6 +222,7 @@ def _kernel_call_kwargs(
     expert_map: torch.Tensor | None,
     global_num_experts: int,
     apply_router_weight_on_input: bool,
+    activation: str = "silu",
 ) -> dict[str, Any]:
     kwargs = {
         "hidden_states": hidden_states,
@@ -252,9 +249,9 @@ def _kernel_call_kwargs(
         if "activation" in params:
             try:
                 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-                kwargs["activation"] = MoEActivation.SILU
-            except Exception:
-                kwargs["activation"] = "silu"
+                kwargs["activation"] = MoEActivation(activation)
+            except (ImportError, ValueError):
+                kwargs["activation"] = activation
         if "inplace" in params:
             kwargs["inplace"] = False
     return kwargs
@@ -269,17 +266,11 @@ def run_condition(
     out_dir: Path,
 ) -> dict[str, Any] | None:
     device = torch.device("cuda", torch.cuda.current_device())
-    # vllm 0.23 requires WorkspaceManager to be initialized before kernel.apply
-    try:
-        from vllm.v1.worker.workspace import init_workspace_manager
-        init_workspace_manager(device)
-    except Exception:
-        pass
     ep_rank, tp_rank = rank_geometry(env.rank, cond.parallel.tp)
     dtype = dtype_from_name(cond.shape.dtype)
 
     hidden_gen = torch.Generator(device=device)
-    hidden_gen.manual_seed(cfg.seed + cond.tokens + int(cond.alpha * 1000) + env.rank)
+    hidden_gen.manual_seed(cfg.seed + cond.tokens + int(cond.alpha * 1000) + env.rank + hash(cond.routing_mode) % 10000)
     hidden_states = torch.randn(
         (cond.tokens, cond.shape.hidden_size),
         generator=hidden_gen,
@@ -312,7 +303,6 @@ def run_condition(
         weight_mode=cfg.routing_weight_mode,
         topk_index_dtype=artifacts.topk_index_dtype,
         routing_mode=cond.routing_mode,
-        zipf_s=cfg.zipf_s,
     )
 
     num_tokens_across_dp = torch.tensor([cond.tokens] * cond.parallel.ep, device=device, dtype=torch.int32)
@@ -329,6 +319,7 @@ def run_condition(
         expert_map=expert_map,
         global_num_experts=cond.shape.num_experts,
         apply_router_weight_on_input=cfg.apply_router_weight_on_input,
+        activation=cond.shape.activation,
     )
 
     dist.barrier()
@@ -339,43 +330,38 @@ def run_condition(
             num_tokens=cond.tokens,
             num_tokens_across_dp=num_tokens_across_dp,
         ):
-            from contextlib import nullcontext
-            from vllm.forward_context import get_forward_context
-            _fctx = get_forward_context()
-            _sp_ctx = (_fctx.dp_metadata.sp_local_sizes(1)
-                       if _fctx.dp_metadata is not None else nullcontext())
-            with _sp_ctx:
-                for _ in range(cfg.warmup_iters):
-                    torch.cuda.nvtx.range_push("moe_kernel_warmup")
+            for _ in range(cfg.warmup_iters):
+                torch.cuda.nvtx.range_push("moe_kernel_warmup")
+                with sp_local_sizes_context():
                     _ = kernel.apply(**mk_kwargs)
-                    torch.cuda.nvtx.range_pop()
+                torch.cuda.nvtx.range_pop()
     torch.cuda.synchronize()
     dist.barrier()
 
-    timings_ms: list[float] = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
+    # Deferred-sync timing: record all events without syncing inside the loop,
+    # then synchronize once after all reps. This keeps the CPU-GPU sync out of
+    # the hot path so each elapsed_time() reflects only kernel execution time.
+    event_pairs: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
     with vllm_config_context(artifacts.vllm_config):
         for _ in range(cfg.measure_iters):
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
             with set_forward_context(
                 None,
                 artifacts.vllm_config,
                 num_tokens=cond.tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
             ):
-                from vllm.forward_context import get_forward_context
-                _fctx = get_forward_context()
-                _sp_ctx = (_fctx.dp_metadata.sp_local_sizes(1)
-                           if _fctx.dp_metadata is not None else nullcontext())
-                with _sp_ctx:
+                with sp_local_sizes_context():
                     torch.cuda.nvtx.range_push("moe_kernel_timed")
                     start_event.record()
                     _ = kernel.apply(**mk_kwargs)
                     end_event.record()
                     torch.cuda.nvtx.range_pop()
-                    end_event.synchronize()
-                    timings_ms.append(float(start_event.elapsed_time(end_event)))
+            event_pairs.append((start_event, end_event))
+
+    torch.cuda.synchronize()
+    timings_ms = [float(s.elapsed_time(e)) for s, e in event_pairs]
 
     torch.cuda.synchronize()
     dist.barrier()
@@ -412,19 +398,16 @@ def run_condition(
     rank_means = [float(item["mean_ms"]) for item in per_rank]
 
     summary = {
-        # --- configuration ---
         "study_name": cfg.study_name,
         "shape": cond.shape.name,
         "mode": cond.mode,
         "routing_mode": cond.routing_mode,
-        "zipf_s": cfg.zipf_s if cond.routing_mode == "zipfian" else None,
         "tp": cond.parallel.tp,
         "ep": cond.parallel.ep,
         "world_size": cond.parallel.world_size,
         "tokens": cond.tokens,
         "alpha_requested": cond.alpha,
         "alpha_observed": routing.stats.observed_alpha,
-        "imbalance_ratio_alpha": routing.stats.observed_alpha,
         "backend": cfg.all2all_backend,
         "dtype": cond.shape.dtype,
         "hidden_size": cond.shape.hidden_size,
@@ -433,29 +416,19 @@ def run_condition(
         "topk": cond.shape.topk,
         "warmup_iters": cfg.warmup_iters,
         "measure_iters": cfg.measure_iters,
-        # --- timing ---
         "latency_median_ms_max_rank": max(rank_medians),
         "latency_mean_ms_max_rank": max(rank_means),
         "latency_median_ms_mean_across_ranks": float(statistics.mean(rank_medians)),
         "latency_mean_ms_mean_across_ranks": float(statistics.mean(rank_means)),
-        "latency_p95_ms_max_rank": max(_percentile(item["timings_ms"], 0.95) for item in per_rank),
-        "latency_p99_ms_max_rank": max(_percentile(item["timings_ms"], 0.99) for item in per_rank),
-        "latency_min_ms_max_rank": max(float(item["min_ms"]) for item in per_rank),
-        "latency_std_ms_max_rank": max(float(statistics.stdev(item["timings_ms"])) if len(item["timings_ms"]) > 1 else 0.0 for item in per_rank),
-        # --- derived quantities (Table 3) ---
-        "avg_tokens_per_expert": float(cond.tokens * cond.shape.topk) / cond.shape.num_experts,
-        "avg_tokens_per_expert_per_gpu": float(cond.tokens * cond.shape.topk) / cond.shape.num_experts / max(cond.parallel.ep, 1),
-        "expert_GEMM_AMI": 2.0 * float(cond.tokens * cond.shape.topk) / cond.shape.num_experts / max(cond.parallel.ep, 1),
-        # A100 BF16 ridge ≈ 156 flops/byte (312 TFLOPS / 2 TB/s)
-        "compute_bound_predicted_a100": (2.0 * float(cond.tokens * cond.shape.topk) / cond.shape.num_experts / max(cond.parallel.ep, 1)) > 156.0,
-        "tokens_to_hottest_expert": max(routing.stats.counts),
-        # --- raw data ---
         "per_rank": per_rank,
         "routing_counts": routing.stats.counts,
         "routing_probabilities": routing.stats.probabilities,
     }
 
-    stem = f"{cond.shape.name}-{cond.mode}-{cond.routing_mode}-tp{cond.parallel.tp}-ep{cond.parallel.ep}-tok{cond.tokens}-alpha{cond.alpha:.3f}"
+    if cond.routing_mode != "alpha":
+        stem = f"{cond.shape.name}-{cond.mode}-{cond.routing_mode}-tp{cond.parallel.tp}-ep{cond.parallel.ep}-tok{cond.tokens}"
+    else:
+        stem = f"{cond.shape.name}-{cond.mode}-tp{cond.parallel.tp}-ep{cond.parallel.ep}-tok{cond.tokens}-alpha{cond.alpha:.3f}"
     rank_dir = ensure_dir(out_dir / "per_rank")
     rank_path = rank_dir / f"{stem}.json"
     write_json(rank_path, summary)
@@ -535,9 +508,8 @@ def run_parallel_point(
     for cond in conditions:
         if env.rank == 0:
             print(
-                f"[cond] shape={cond.shape.name} mode={cond.mode} routing={cond.routing_mode} "
-                f"tp={cond.parallel.tp} ep={cond.parallel.ep} "
-                f"tokens={cond.tokens} alpha={cond.alpha}"
+                f"[cond] shape={cond.shape.name} mode={cond.mode} routing_mode={cond.routing_mode} "
+                f"tp={cond.parallel.tp} ep={cond.parallel.ep} tokens={cond.tokens} alpha={cond.alpha}"
             )
         row = run_condition(cfg=cfg, cond=cond, env=env, artifacts=artifacts_by_shape[cond.shape.name], out_dir=out_dir)
         if env.rank == 0 and row is not None:

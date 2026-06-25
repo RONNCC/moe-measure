@@ -1,10 +1,7 @@
-study_name: fused-moe-characterization-pace-a100
-all2all_backend: deepep_low_latency
+study_name: routing-modes-allgather-h100
+all2all_backend: allgather_reducescatter
 output_root: runs
 
-# Direct kernel benchmark only.
-# We use the vLLM fused-MoE kernel library, but do not use the vLLM
-# serving/runtime pipeline.
 hot_expert_count: 1
 routing_weight_mode: uniform
 apply_router_weight_on_input: false
@@ -16,7 +13,6 @@ bucket_profile_iters: 5
 bucket_full_events: true
 
 sweep_modes:
-  - one_at_a_time
   - full_factorial
 
 baseline:
@@ -26,7 +22,6 @@ baseline:
     tp: 1
     ep: 1
 
-# Replace these with your final two representative shapes.
 kernel_shapes:
   - name: mixtral_like
     hidden_size: 4096
@@ -41,28 +36,23 @@ kernel_shapes:
     topk: 2
     dtype: bfloat16
 
-alphas: [1.0, 2.0, 4.0, 8.0]
-tokens: [128, 256, 512, 1024, 2048, 4096]
+routing_modes: [uniform, zipfian, random, skewed-2x, skewed-4x, worst-case]
+alphas: [1.0]
+tokens: [64, 256, 512, 1024, 2048, 4096, 8192, 12288, 16384, 20480, 32768, 65536]
 
-# Submit one Slurm job per TP/EP point.
-# Keep points to sizes that match your GPU allocation and expert count.
 parallel_points:
   - {tp: 1, ep: 1}
-  - {tp: 1, ep: 2}
   - {tp: 1, ep: 4}
-  - {tp: 1, ep: 8}
   - {tp: 2, ep: 2}
-  - {tp: 2, ep: 4}
 
 slurm:
   qos: coc-ice
-  time: 02:00:00
+  time: 04:00:00
   cpus_per_task: 8
-  gpus_per_node: 2
-  gpu_type: a100
+  gpus_per_node: 8
+  gpu_type: h100
   use_gres: true
   mem: 128G
-  modules: [gcc/12.3.0, python/3.11, cuda/12.1.1]
+  modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
   workdir: /home/hice1/sghose7/moe-breakdown
-  uv_env_dir: $TMPDIR/moe-breakdown-venv
   extra_sbatch_args: []

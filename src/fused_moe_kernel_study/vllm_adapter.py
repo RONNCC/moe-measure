@@ -23,6 +23,32 @@ def _maybe_enum_member(enum_cls: Any, names: list[str]) -> Any | None:
 
 
 @contextmanager
+def sp_local_sizes_context():
+    """Enter dp_metadata.sp_local_sizes(1) if dp_metadata is present.
+
+    vllm's MoE runner enters this before dispatch so local_sizes is populated
+    for the allgather all2all path. We bypass the runner so we must do it ourselves.
+
+    NOTE: must not wrap the yield in try/except — if an exception is thrown into
+    the generator by contextmanager's __exit__, catching it here would cause the
+    generator to yield a second time, raising "generator didn't stop after throw()".
+    """
+    from contextlib import nullcontext
+
+    cm = nullcontext()
+    try:
+        from vllm.forward_context import get_forward_context
+        ctx = get_forward_context()
+        if ctx is not None and getattr(ctx, "dp_metadata", None) is not None:
+            cm = ctx.dp_metadata.sp_local_sizes(1)
+    except Exception:
+        pass
+
+    with cm:
+        yield
+
+
+@contextmanager
 def vllm_config_context(vllm_config: Any):
     from vllm.config import set_current_vllm_config
 
@@ -145,25 +171,24 @@ def make_fused_experts(moe_config: Any, quant_config: Any, prepare_finalize: Any
             max_num_tokens = getattr(moe_config, "max_num_tokens", None)
         constructors: list[tuple[Any, dict[str, Any]]] = []
         try:
-            from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import BatchedTritonExperts
-
-            constructors.append((BatchedTritonExperts, {"moe_config": moe_config, "quant_config": quant_config, "max_num_tokens": max_num_tokens, "num_dispatchers": num_dispatchers}))
-        except Exception:
-            pass
-        try:
             from vllm.model_executor.layers.fused_moe import BatchedTritonExperts
 
-            constructors.append((BatchedTritonExperts, {"moe_config": moe_config, "quant_config": quant_config, "max_num_tokens": max_num_tokens, "num_dispatchers": num_dispatchers}))
+            constructors.append((BatchedTritonExperts, {
+                "moe_config": moe_config,
+                "quant_config": quant_config,
+                "max_num_tokens": max_num_tokens,
+                "num_dispatchers": num_dispatchers,
+            }))
         except Exception:
             pass
         try:
             from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import BatchedTritonOrDeepGemmExperts
 
             constructors.append((BatchedTritonOrDeepGemmExperts, {
+                "moe_config": moe_config,
+                "quant_config": quant_config,
                 "max_num_tokens": max_num_tokens,
                 "num_dispatchers": num_dispatchers,
-                "quant_config": quant_config,
-                "allow_deep_gemm": False,
             }))
         except Exception:
             pass
@@ -175,23 +200,15 @@ def make_fused_experts(moe_config: Any, quant_config: Any, prepare_finalize: Any
     else:
         constructors = []
         try:
-            from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-
-            constructors.append((TritonExperts, {"moe_config": moe_config, "quant_config": quant_config}))
-        except Exception:
-            pass
-        try:
             from vllm.model_executor.layers.fused_moe import TritonExperts
 
             constructors.append((TritonExperts, {"moe_config": moe_config, "quant_config": quant_config}))
-            constructors.append((TritonExperts, {}))
         except Exception:
             pass
         try:
             from vllm.model_executor.layers.fused_moe import TritonOrDeepGemmExperts
 
-            constructors.append((TritonOrDeepGemmExperts, {"moe_config": moe_config, "quant_config": quant_config, "allow_deep_gemm": False}))
-            constructors.append((TritonOrDeepGemmExperts, {"quant_config": quant_config, "allow_deep_gemm": False}))
+            constructors.append((TritonOrDeepGemmExperts, {"moe_config": moe_config, "quant_config": quant_config}))
         except Exception:
             pass
         for cls, kwargs in constructors:
@@ -251,6 +268,15 @@ def make_kernel(
     return kernel_cls(**{k: v for k, v in kwargs.items() if k in sig.parameters})
 
 
+def _maybe_init_workspace_manager() -> None:
+    try:
+        from vllm.v1.worker.workspace import init_workspace_manager
+        device = torch.device("cuda", torch.cuda.current_device())
+        init_workspace_manager(device)
+    except Exception:
+        pass
+
+
 def build_kernel_artifacts(
     *,
     shape_name: str,
@@ -264,6 +290,7 @@ def build_kernel_artifacts(
     all2all_backend: str,
     ep_size: int,
 ) -> KernelArtifacts:
+    _maybe_init_workspace_manager()
     vllm_config = build_vllm_config(all2all_backend=all2all_backend, ep_size=ep_size)
     with vllm_config_context(vllm_config):
         quant_config = make_unquantized_config()

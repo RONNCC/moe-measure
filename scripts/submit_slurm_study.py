@@ -93,7 +93,7 @@ def build_sbatch_command(config_path: Path, tp: int, ep: int, dry_run: bool = Fa
         export_bits["DEEPEP_WHEEL"] = deepep_wheel
     export_arg = ",".join([k if v is None else f"{k}={v}" for k, v in export_bits.items()])
     cmd.append(f"--export={export_arg}")
-    cmd.append(str((ROOT / "slurm" / "run_direct_moe_sweep.sbatch").resolve()))
+    cmd.append(str((ROOT / "slurm" / slurm.sbatch_script).resolve()))
     return cmd
 
 

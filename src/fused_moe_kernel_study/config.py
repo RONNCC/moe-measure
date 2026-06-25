@@ -49,8 +49,9 @@ class SlurmConfig:
     workdir: str | None = None
     uv_env_dir: str | None = None
     deepep_wheel: str | None = None
-    min_nodes: int = 1
     extra_sbatch_args: list[str] = field(default_factory=list)
+    min_nodes: int = 1
+    sbatch_script: str = "run_direct_moe_sweep.sbatch"
 
 
 @dataclass(frozen=True)
@@ -74,10 +75,7 @@ class StudyConfig:
     bucket_full_events: bool = True
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
     baseline: dict[str, Any] = field(default_factory=dict)
-    # New routing-mode sweep (replaces alpha sweep when non-empty).
-    # Supported values: skewed, uniform, zipfian, random, skewed-2x, skewed-4x, worst-case
-    routing_modes: list[str] = field(default_factory=list)
-    zipf_s: float = 1.0
+    routing_modes: list[str] = field(default_factory=list)  # empty = use alpha sweep (backward compat)
 
     def max_tokens(self) -> int:
         return max(self.tokens)
@@ -106,7 +104,7 @@ class BenchmarkCondition:
     tokens: int
     alpha: float
     mode: str
-    routing_mode: str = "skewed"
+    routing_mode: str = "alpha"
 
     def as_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -127,12 +125,12 @@ def _require_keys(data: dict[str, Any], keys: list[str]) -> None:
 def load_study_config(path: str | Path) -> StudyConfig:
     path = Path(path)
     raw = yaml.safe_load(path.read_text()) or {}
-    # routing_modes is an alternative to alphas; require at least one.
-    has_alphas = "alphas" in raw
-    has_routing_modes = "routing_modes" in raw and raw["routing_modes"]
-    if not has_alphas and not has_routing_modes:
-        raise ValueError("Config must have either 'alphas' or 'routing_modes'")
-    _require_keys(raw, ["study_name", "all2all_backend", "kernel_shapes", "parallel_points", "tokens"])
+    # alphas is required only when routing_modes is absent/empty
+    routing_modes = list(raw.get("routing_modes") or [])
+    base_required = ["study_name", "all2all_backend", "kernel_shapes", "parallel_points", "tokens"]
+    if not routing_modes:
+        base_required.append("alphas")
+    _require_keys(raw, base_required)
 
     shapes = [KernelShape(**item) for item in raw["kernel_shapes"]]
     parallel_points = [ParallelPoint(**item) for item in raw["parallel_points"]]
@@ -158,8 +156,7 @@ def load_study_config(path: str | Path) -> StudyConfig:
         bucket_full_events=bool(raw.get("bucket_full_events", True)),
         slurm=slurm,
         baseline=dict(raw.get("baseline") or {}),
-        routing_modes=list(raw.get("routing_modes") or []),
-        zipf_s=float(raw.get("zipf_s", 1.0)),
+        routing_modes=routing_modes,
     )
     invalid_modes = [m for m in cfg.sweep_modes if m not in VALID_SWEEP_MODES]
     if invalid_modes:
@@ -173,75 +170,43 @@ def make_conditions(cfg: StudyConfig, parallel: ParallelPoint) -> list[Benchmark
     baseline_tokens = cfg.baseline_tokens()
     baseline_parallel = cfg.baseline_parallel()
 
-    # If routing_modes is specified, sweep routing_mode instead of alpha.
     use_routing_modes = bool(cfg.routing_modes)
-    baseline_routing_mode = cfg.routing_modes[0] if use_routing_modes else "skewed"
 
     for shape in cfg.kernel_shapes:
         if use_routing_modes:
-            # ---- routing_modes sweep ----
+            # Named routing-mode sweep: iterate routing_modes × tokens (full factorial only).
+            # one_at_a_time variant: each routing_mode at baseline_tokens, then baseline mode at all tokens.
             if "one_at_a_time" in cfg.sweep_modes:
-                # Vary routing_mode, hold tokens=baseline
                 for rmode in cfg.routing_modes:
-                    conditions.append(BenchmarkCondition(
-                        shape=shape, parallel=parallel,
-                        tokens=baseline_tokens, alpha=1.0,
-                        mode="one_at_a_time", routing_mode=rmode,
-                    ))
-                # Vary tokens, hold routing_mode=baseline
+                    conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=baseline_tokens, alpha=1.0, mode="one_at_a_time", routing_mode=rmode))
                 for tokens in cfg.tokens:
-                    conditions.append(BenchmarkCondition(
-                        shape=shape, parallel=parallel,
-                        tokens=tokens, alpha=1.0,
-                        mode="one_at_a_time", routing_mode=baseline_routing_mode,
-                    ))
-                # If this parallel point differs from baseline, add that fixed point too
+                    conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=tokens, alpha=1.0, mode="one_at_a_time", routing_mode=cfg.routing_modes[0]))
                 if parallel != baseline_parallel:
-                    conditions.append(BenchmarkCondition(
-                        shape=shape, parallel=parallel,
-                        tokens=baseline_tokens, alpha=1.0,
-                        mode="one_at_a_time", routing_mode=baseline_routing_mode,
-                    ))
-            if "full_factorial" in cfg.sweep_modes:
-                for rmode in cfg.routing_modes:
-                    for tokens in cfg.tokens:
-                        conditions.append(BenchmarkCondition(
-                            shape=shape, parallel=parallel,
-                            tokens=tokens, alpha=1.0,
-                            mode="full_factorial", routing_mode=rmode,
-                        ))
-        else:
-            # ---- legacy alpha sweep ----
-            if "one_at_a_time" in cfg.sweep_modes:
-                for alpha in cfg.alphas:
-                    conditions.append(BenchmarkCondition(
-                        shape=shape, parallel=parallel,
-                        tokens=baseline_tokens, alpha=alpha,
-                        mode="one_at_a_time", routing_mode="skewed",
-                    ))
-                for tokens in cfg.tokens:
-                    conditions.append(BenchmarkCondition(
-                        shape=shape, parallel=parallel,
-                        tokens=tokens, alpha=baseline_alpha,
-                        mode="one_at_a_time", routing_mode="skewed",
-                    ))
-                if parallel != baseline_parallel:
-                    conditions.append(BenchmarkCondition(
-                        shape=shape, parallel=parallel,
-                        tokens=baseline_tokens, alpha=baseline_alpha,
-                        mode="one_at_a_time", routing_mode="skewed",
-                    ))
-            if "full_factorial" in cfg.sweep_modes:
-                for alpha in cfg.alphas:
-                    for tokens in cfg.tokens:
-                        conditions.append(BenchmarkCondition(
-                            shape=shape, parallel=parallel,
-                            tokens=tokens, alpha=alpha,
-                            mode="full_factorial", routing_mode="skewed",
-                        ))
+                    conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=baseline_tokens, alpha=1.0, mode="one_at_a_time", routing_mode=cfg.routing_modes[0]))
 
-    dedup: dict[tuple[str, int, float, int, int, str, str], BenchmarkCondition] = {}
+            if "full_factorial" in cfg.sweep_modes:
+                for rmode in cfg.routing_modes:
+                    for tokens in cfg.tokens:
+                        conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=tokens, alpha=1.0, mode="full_factorial", routing_mode=rmode))
+        else:
+            # Legacy alpha-sweep behavior.
+            if "one_at_a_time" in cfg.sweep_modes:
+                for alpha in cfg.alphas:
+                    conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=baseline_tokens, alpha=alpha, mode="one_at_a_time"))
+                for tokens in cfg.tokens:
+                    conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=tokens, alpha=baseline_alpha, mode="one_at_a_time"))
+                if parallel == baseline_parallel:
+                    pass
+                else:
+                    conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=baseline_tokens, alpha=baseline_alpha, mode="one_at_a_time"))
+
+            if "full_factorial" in cfg.sweep_modes:
+                for alpha in cfg.alphas:
+                    for tokens in cfg.tokens:
+                        conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=tokens, alpha=alpha, mode="full_factorial"))
+
+    dedup: dict[tuple[str, int, float, str, int, int, str], BenchmarkCondition] = {}
     for cond in conditions:
-        key = (cond.shape.name, cond.tokens, cond.alpha, cond.parallel.tp, cond.parallel.ep, cond.mode, cond.routing_mode)
+        key = (cond.shape.name, cond.tokens, cond.alpha, cond.routing_mode, cond.parallel.tp, cond.parallel.ep, cond.mode)
         dedup[key] = cond
     return list(dedup.values())

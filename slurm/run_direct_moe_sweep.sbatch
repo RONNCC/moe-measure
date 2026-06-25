@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --ntasks=1
+#SBATCH --gpus-per-task=1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=02:00:00
-#SBATCH --exclude=atl1-1-03-012-28-0,atl1-1-03-013-8-0,atl1-1-03-013-3-0
 
 set -euo pipefail
 
@@ -58,7 +58,7 @@ fi
 # deep_ep is compiled against nvidia-nccl-cu13; its rpath points to the build-time
 # venv, so we override with the active venv's location here.
 if python -c "import nvidia.nccl" 2>/dev/null; then
-  NCCL_LIB_DIR=$(python -c "import os, nvidia.nccl; print(os.path.join(nvidia.nccl.__path__[0], 'lib'))")
+  NCCL_LIB_DIR=$(python -c "import os, nvidia.nccl; print(os.path.join(os.path.dirname(nvidia.nccl.__file__), 'lib'))")
   export LD_LIBRARY_PATH="${NCCL_LIB_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   echo "[slurm] LD_LIBRARY_PATH set for NCCL: $NCCL_LIB_DIR"
 fi
