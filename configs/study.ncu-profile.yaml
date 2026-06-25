@@ -1,0 +1,56 @@
+study_name: ncu-profile-h100
+all2all_backend: allgather_reducescatter
+output_root: runs
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 0
+warmup_iters: 5
+measure_iters: 5
+collect_buckets: false
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 4096
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: mixtral_like
+    hidden_size: 4096
+    intermediate_size: 14336
+    num_experts: 8
+    topk: 2
+    dtype: bfloat16
+  - name: deepseek_like
+    hidden_size: 7168
+    intermediate_size: 18432
+    num_experts: 16
+    topk: 2
+    dtype: bfloat16
+
+routing_modes: [uniform, zipfian, worst-case]
+alphas: [1.0]
+tokens: [4096]
+
+parallel_points:
+  - {tp: 1, ep: 1}
+  - {tp: 1, ep: 4}
+
+slurm:
+  qos: coc-ice
+  time: 02:00:00
+  cpus_per_task: 8
+  gpus_per_node: 8
+  gpu_type: h100
+  use_gres: true
+  mem: 128G
+  modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
+  workdir: /home/hice1/sghose7/moe-breakdown
+  extra_sbatch_args: []
+  sbatch_script: run_ncu_profile.sbatch

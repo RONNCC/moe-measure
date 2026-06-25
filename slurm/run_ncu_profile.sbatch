@@ -62,7 +62,7 @@ fi
 # deep_ep is compiled against nvidia-nccl-cu13; its rpath points to the build-time
 # venv, so we override with the active venv's location here.
 if python -c "import nvidia.nccl" 2>/dev/null; then
-  NCCL_LIB_DIR=$(python -c "import nvidia.nccl, os; base = getattr(nvidia.nccl, '__file__', None) or list(nvidia.nccl.__path__)[0]; print(os.path.join(os.path.dirname(base), 'lib'))")
+  NCCL_LIB_DIR=$(python -c "import os, nvidia.nccl; print(os.path.join(os.path.dirname(nvidia.nccl.__file__), 'lib'))")
   export LD_LIBRARY_PATH="${NCCL_LIB_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   echo "[slurm] LD_LIBRARY_PATH set for NCCL: $NCCL_LIB_DIR"
 fi
@@ -76,10 +76,14 @@ if [[ -z "${MASTER_ADDR:-}" && -n "${SLURM_NODELIST:-}" ]]; then
   MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 fi
 
+NCU_OUTPUT_DIR="${OUT_DIR:-${WORKDIR}/ncu-profiles}"
+mkdir -p "$NCU_OUTPUT_DIR"
+
 echo "[slurm] WORKDIR=$WORKDIR"
 echo "[slurm] STUDY_CONFIG=$STUDY_CONFIG"
 echo "[slurm] TP_SIZE=$TP_SIZE EP_SIZE=$EP_SIZE WORLD_SIZE=$WORLD_SIZE"
 echo "[slurm] OUT_DIR=$OUT_DIR"
+echo "[slurm] NCU_OUTPUT_DIR=$NCU_OUTPUT_DIR"
 
 ARGS=(
   --config "$STUDY_CONFIG"
@@ -94,4 +98,9 @@ srun \
   --ntasks="$WORLD_SIZE" \
   --gpus-per-task=1 \
   --cpus-per-task="$CPUS_PER_TASK" \
+  ncu \
+    --target-processes all \
+    --metrics "sm__warps_active.avg.pct_of_peak_sustained_active,l2__hit_rate.pct,dram__bytes_read.sum,dram__bytes_write.sum,gpu__time_duration.sum" \
+    --csv \
+    --log-file "${NCU_OUTPUT_DIR}/ncu_rank%q{PMIX_RANK}.csv" \
   python3 "$ROOT_DIR/scripts/run_direct_moe_sweep.py" "${ARGS[@]}"
