@@ -40,7 +40,8 @@ tokens: [4096]
 
 parallel_points:
   - {tp: 1, ep: 1}
-  # tp1-ep4 blocked: NCU intercepts CUDA calls, breaking NCCL init across ranks
+  # tp1-ep4 blocked: NCU kernel-replay holds GPU exclusively, breaking NCCL;
+  #   application-replay also fails (cudaErrorDevicesUnavailable). ep1 only.
 
 slurm:
   qos: coc-ice

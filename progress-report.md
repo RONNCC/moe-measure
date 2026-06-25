@@ -6,6 +6,33 @@
 
 ---
 
+## Measurement Coverage
+
+### What we could measure
+
+| Study | Backend | Parallel configs | Token range | Status |
+|-------|---------|-----------------|-------------|--------|
+| routing-modes-allgather-h100 | allgather_reducescatter | tp1-ep1, tp1-ep4, tp2-ep2 | 64–65536 | Complete |
+| routing-modes-deepep-h100 | deepep_low_latency | tp1-ep1 only | 64–65536 | Complete |
+| NCU kernel profiling | allgather | tp1-ep1 only | 4096 | Complete (kernel-replay mode) |
+
+### What we couldn't measure, and why
+
+**DeepEP at EP > 1 (tp1-ep4, tp2-ep2, etc.)**
+DeepEP uses NVSHMEM for one-sided RDMA between GPUs. NVSHMEM requires InfiniBand RC (reliable connection) transport. PACE ICE's IB fabric is configured for UD (unreliable datagram) — the NVSHMEM bootstrap fails with an IBRC error at job init. Only tp1-ep1 works because it performs no cross-GPU dispatch (all experts are local, NVSHMEM is initialized but never exercised).
+
+**NCU profiling at EP > 1**
+Tried two NCU replay modes:
+- *Kernel-replay* (default): NCU holds the GPU device exclusively while replaying each kernel, blocking other ranks' NCCL collectives. NCCL times out waiting for a barrier to complete and crashes with a distributed store connection error.
+- *Application-replay*: NCU pre-allocates CUDA resources before the application initializes, leaving the device unavailable when PyTorch calls `torch.cuda.set_device()`. Fails with `cudaErrorDevicesUnavailable`.
+
+The only path forward for multi-GPU NCU profiling would be CUDA MPS (Multi-Process Service), which allows concurrent CUDA contexts, but MPS is not available on PACE ICE compute nodes.
+
+**Tokens > 65536**
+The vLLM workspace manager pre-allocates a scratch buffer sized to `max_num_tokens`. At 131072 tokens, deepseek_like with ep=4 requires ~84 GB — exceeding the H100's 80 GB HBM. Capped at 65536 tokens (~42 GB peak).
+
+---
+
 ## Overview
 
 This report maps the four-phase experimental study spec against what has actually been run and what data currently exists. The study characterizes fused MoE kernel latency as a function of routing distribution, token count, TP/EP parallelism, and all2all backend — calling `FusedMoEModularKernel.apply()` directly with synthetic inputs, bypassing the vLLM serving stack entirely.
