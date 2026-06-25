@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --ntasks=1
-#SBATCH --gpus-per-task=1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=02:00:00
+#SBATCH --exclude=atl1-1-03-012-28-0,atl1-1-03-013-8-0,atl1-1-03-013-3-0
 
 set -euo pipefail
 
@@ -52,6 +52,15 @@ fi
 if [[ -n "$VENV" ]]; then
   # shellcheck disable=SC1090
   source "$VENV/bin/activate"
+fi
+
+# Point deep_ep.so to the NCCL 2.30+ GIN library at runtime.
+# deep_ep is compiled against nvidia-nccl-cu13; its rpath points to the build-time
+# venv, so we override with the active venv's location here.
+if python -c "import nvidia.nccl" 2>/dev/null; then
+  NCCL_LIB_DIR=$(python -c "import os, nvidia.nccl; print(os.path.join(nvidia.nccl.__path__[0], 'lib'))")
+  export LD_LIBRARY_PATH="${NCCL_LIB_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  echo "[slurm] LD_LIBRARY_PATH set for NCCL: $NCCL_LIB_DIR"
 fi
 
 export PYTHONUNBUFFERED=1

@@ -67,7 +67,7 @@ def _study_from_kernel_config(config: MoEKernelConfig) -> tuple[StudyConfig, Pat
         activation=config.activation,
     )
     parallel = ParallelPoint(tp=config.tp_size, ep=config.ep_size)
-    out_dir = Path(config.out_dir or Path(config.output_root) / "single_measurements" / f"{config.shape_name}-tp{config.tp_size}-ep{config.ep_size}-tok{config.num_tokens}-alpha{config.alpha:.3f}")
+    out_dir = Path(config.out_dir or Path(config.output_root).expanduser() / "single_measurements" / f"{config.shape_name}-tp{config.tp_size}-ep{config.ep_size}-tok{config.num_tokens}-alpha{config.alpha:.3f}")
     study = StudyConfig(
         study_name="single-moe-kernel-measurement",
         all2all_backend=config.all2all_backend,
@@ -93,7 +93,7 @@ def _study_from_kernel_config(config: MoEKernelConfig) -> tuple[StudyConfig, Pat
 
 def measure_moe_kernel_latency(config: MoEKernelConfig) -> KernelMeasurement:
     study, out_dir = _study_from_kernel_config(config)
-    env = init_vllm_distributed(tp_size=config.tp_size, ep_size=config.ep_size, backend="nccl")
+    env = init_vllm_distributed(tp_size=config.tp_size, ep_size=config.ep_size, backend="nccl", all2all_backend=config.all2all_backend)
     payload: dict[str, Any] | None = None
     try:
         run_parallel_point(cfg=study, parallel_tp=config.tp_size, parallel_ep=config.ep_size, env=env, out_dir=out_dir)
@@ -134,8 +134,8 @@ def run_sweep(config: str | Path | StudyConfig, tp_size: int, ep_size: int, out_
         study = load_study_config(config)
     else:
         study = config
-    out_path = Path(out_dir or Path(study.output_root) / study.study_name / f"tp{tp_size}-ep{ep_size}")
-    env = init_vllm_distributed(tp_size=tp_size, ep_size=ep_size, backend="nccl")
+    out_path = Path(out_dir or Path(study.output_root).expanduser() / study.study_name / f"tp{tp_size}-ep{ep_size}")
+    env = init_vllm_distributed(tp_size=tp_size, ep_size=ep_size, backend="nccl", all2all_backend=study.all2all_backend)
     try:
         run_parallel_point(cfg=study, parallel_tp=tp_size, parallel_ep=ep_size, env=env, out_dir=out_path)
     finally:

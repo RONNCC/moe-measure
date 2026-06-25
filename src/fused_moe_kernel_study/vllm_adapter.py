@@ -145,9 +145,15 @@ def make_fused_experts(moe_config: Any, quant_config: Any, prepare_finalize: Any
             max_num_tokens = getattr(moe_config, "max_num_tokens", None)
         constructors: list[tuple[Any, dict[str, Any]]] = []
         try:
+            from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import BatchedTritonExperts
+
+            constructors.append((BatchedTritonExperts, {"moe_config": moe_config, "quant_config": quant_config, "max_num_tokens": max_num_tokens, "num_dispatchers": num_dispatchers}))
+        except Exception:
+            pass
+        try:
             from vllm.model_executor.layers.fused_moe import BatchedTritonExperts
 
-            constructors.append((BatchedTritonExperts, {"max_num_tokens": max_num_tokens, "num_dispatchers": num_dispatchers}))
+            constructors.append((BatchedTritonExperts, {"moe_config": moe_config, "quant_config": quant_config, "max_num_tokens": max_num_tokens, "num_dispatchers": num_dispatchers}))
         except Exception:
             pass
         try:
@@ -169,8 +175,15 @@ def make_fused_experts(moe_config: Any, quant_config: Any, prepare_finalize: Any
     else:
         constructors = []
         try:
+            from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
+            constructors.append((TritonExperts, {"moe_config": moe_config, "quant_config": quant_config}))
+        except Exception:
+            pass
+        try:
             from vllm.model_executor.layers.fused_moe import TritonExperts
 
+            constructors.append((TritonExperts, {"moe_config": moe_config, "quant_config": quant_config}))
             constructors.append((TritonExperts, {}))
         except Exception:
             pass

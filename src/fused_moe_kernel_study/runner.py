@@ -170,9 +170,15 @@ def profile_bucket_breakdown(
                         num_tokens=cond.tokens,
                         num_tokens_across_dp=num_tokens_across_dp,
                     ):
-                        torch.cuda.nvtx.range_push("moe_kernel_bucket_profile")
-                        _ = kernel.apply(**mk_kwargs)
-                        torch.cuda.nvtx.range_pop()
+                        from contextlib import nullcontext
+                        from vllm.forward_context import get_forward_context
+                        _fctx = get_forward_context()
+                        _sp_ctx = (_fctx.dp_metadata.sp_local_sizes(1)
+                                   if _fctx.dp_metadata is not None else nullcontext())
+                        with _sp_ctx:
+                            torch.cuda.nvtx.range_push("moe_kernel_bucket_profile")
+                            _ = kernel.apply(**mk_kwargs)
+                            torch.cuda.nvtx.range_pop()
             torch.cuda.synchronize()
 
     raw_events = profiler_to_event_dicts(prof, full_events=cfg.bucket_full_events)
@@ -244,7 +250,11 @@ def _kernel_call_kwargs(
 
         params = inspect.signature(sig).parameters
         if "activation" in params:
-            kwargs["activation"] = "silu"
+            try:
+                from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+                kwargs["activation"] = MoEActivation.SILU
+            except Exception:
+                kwargs["activation"] = "silu"
         if "inplace" in params:
             kwargs["inplace"] = False
     return kwargs
@@ -259,6 +269,12 @@ def run_condition(
     out_dir: Path,
 ) -> dict[str, Any] | None:
     device = torch.device("cuda", torch.cuda.current_device())
+    # vllm 0.23 requires WorkspaceManager to be initialized before kernel.apply
+    try:
+        from vllm.v1.worker.workspace import init_workspace_manager
+        init_workspace_manager(device)
+    except Exception:
+        pass
     ep_rank, tp_rank = rank_geometry(env.rank, cond.parallel.tp)
     dtype = dtype_from_name(cond.shape.dtype)
 
@@ -295,6 +311,8 @@ def run_condition(
         seed=cfg.seed + 17,
         weight_mode=cfg.routing_weight_mode,
         topk_index_dtype=artifacts.topk_index_dtype,
+        routing_mode=cond.routing_mode,
+        zipf_s=cfg.zipf_s,
     )
 
     num_tokens_across_dp = torch.tensor([cond.tokens] * cond.parallel.ep, device=device, dtype=torch.int32)
@@ -321,10 +339,16 @@ def run_condition(
             num_tokens=cond.tokens,
             num_tokens_across_dp=num_tokens_across_dp,
         ):
-            for _ in range(cfg.warmup_iters):
-                torch.cuda.nvtx.range_push("moe_kernel_warmup")
-                _ = kernel.apply(**mk_kwargs)
-                torch.cuda.nvtx.range_pop()
+            from contextlib import nullcontext
+            from vllm.forward_context import get_forward_context
+            _fctx = get_forward_context()
+            _sp_ctx = (_fctx.dp_metadata.sp_local_sizes(1)
+                       if _fctx.dp_metadata is not None else nullcontext())
+            with _sp_ctx:
+                for _ in range(cfg.warmup_iters):
+                    torch.cuda.nvtx.range_push("moe_kernel_warmup")
+                    _ = kernel.apply(**mk_kwargs)
+                    torch.cuda.nvtx.range_pop()
     torch.cuda.synchronize()
     dist.barrier()
 
@@ -340,13 +364,18 @@ def run_condition(
                 num_tokens=cond.tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
             ):
-                torch.cuda.nvtx.range_push("moe_kernel_timed")
-                start_event.record()
-                _ = kernel.apply(**mk_kwargs)
-                end_event.record()
-                torch.cuda.nvtx.range_pop()
-                end_event.synchronize()
-                timings_ms.append(float(start_event.elapsed_time(end_event)))
+                from vllm.forward_context import get_forward_context
+                _fctx = get_forward_context()
+                _sp_ctx = (_fctx.dp_metadata.sp_local_sizes(1)
+                           if _fctx.dp_metadata is not None else nullcontext())
+                with _sp_ctx:
+                    torch.cuda.nvtx.range_push("moe_kernel_timed")
+                    start_event.record()
+                    _ = kernel.apply(**mk_kwargs)
+                    end_event.record()
+                    torch.cuda.nvtx.range_pop()
+                    end_event.synchronize()
+                    timings_ms.append(float(start_event.elapsed_time(end_event)))
 
     torch.cuda.synchronize()
     dist.barrier()
@@ -383,15 +412,19 @@ def run_condition(
     rank_means = [float(item["mean_ms"]) for item in per_rank]
 
     summary = {
+        # --- configuration ---
         "study_name": cfg.study_name,
         "shape": cond.shape.name,
         "mode": cond.mode,
+        "routing_mode": cond.routing_mode,
+        "zipf_s": cfg.zipf_s if cond.routing_mode == "zipfian" else None,
         "tp": cond.parallel.tp,
         "ep": cond.parallel.ep,
         "world_size": cond.parallel.world_size,
         "tokens": cond.tokens,
         "alpha_requested": cond.alpha,
         "alpha_observed": routing.stats.observed_alpha,
+        "imbalance_ratio_alpha": routing.stats.observed_alpha,
         "backend": cfg.all2all_backend,
         "dtype": cond.shape.dtype,
         "hidden_size": cond.shape.hidden_size,
@@ -400,16 +433,29 @@ def run_condition(
         "topk": cond.shape.topk,
         "warmup_iters": cfg.warmup_iters,
         "measure_iters": cfg.measure_iters,
+        # --- timing ---
         "latency_median_ms_max_rank": max(rank_medians),
         "latency_mean_ms_max_rank": max(rank_means),
         "latency_median_ms_mean_across_ranks": float(statistics.mean(rank_medians)),
         "latency_mean_ms_mean_across_ranks": float(statistics.mean(rank_means)),
+        "latency_p95_ms_max_rank": max(_percentile(item["timings_ms"], 0.95) for item in per_rank),
+        "latency_p99_ms_max_rank": max(_percentile(item["timings_ms"], 0.99) for item in per_rank),
+        "latency_min_ms_max_rank": max(float(item["min_ms"]) for item in per_rank),
+        "latency_std_ms_max_rank": max(float(statistics.stdev(item["timings_ms"])) if len(item["timings_ms"]) > 1 else 0.0 for item in per_rank),
+        # --- derived quantities (Table 3) ---
+        "avg_tokens_per_expert": float(cond.tokens * cond.shape.topk) / cond.shape.num_experts,
+        "avg_tokens_per_expert_per_gpu": float(cond.tokens * cond.shape.topk) / cond.shape.num_experts / max(cond.parallel.ep, 1),
+        "expert_GEMM_AMI": 2.0 * float(cond.tokens * cond.shape.topk) / cond.shape.num_experts / max(cond.parallel.ep, 1),
+        # A100 BF16 ridge ≈ 156 flops/byte (312 TFLOPS / 2 TB/s)
+        "compute_bound_predicted_a100": (2.0 * float(cond.tokens * cond.shape.topk) / cond.shape.num_experts / max(cond.parallel.ep, 1)) > 156.0,
+        "tokens_to_hottest_expert": max(routing.stats.counts),
+        # --- raw data ---
         "per_rank": per_rank,
         "routing_counts": routing.stats.counts,
         "routing_probabilities": routing.stats.probabilities,
     }
 
-    stem = f"{cond.shape.name}-{cond.mode}-tp{cond.parallel.tp}-ep{cond.parallel.ep}-tok{cond.tokens}-alpha{cond.alpha:.3f}"
+    stem = f"{cond.shape.name}-{cond.mode}-{cond.routing_mode}-tp{cond.parallel.tp}-ep{cond.parallel.ep}-tok{cond.tokens}-alpha{cond.alpha:.3f}"
     rank_dir = ensure_dir(out_dir / "per_rank")
     rank_path = rank_dir / f"{stem}.json"
     write_json(rank_path, summary)
@@ -489,7 +535,8 @@ def run_parallel_point(
     for cond in conditions:
         if env.rank == 0:
             print(
-                f"[cond] shape={cond.shape.name} mode={cond.mode} tp={cond.parallel.tp} ep={cond.parallel.ep} "
+                f"[cond] shape={cond.shape.name} mode={cond.mode} routing={cond.routing_mode} "
+                f"tp={cond.parallel.tp} ep={cond.parallel.ep} "
                 f"tokens={cond.tokens} alpha={cond.alpha}"
             )
         row = run_condition(cfg=cfg, cond=cond, env=env, artifacts=artifacts_by_shape[cond.shape.name], out_dir=out_dir)

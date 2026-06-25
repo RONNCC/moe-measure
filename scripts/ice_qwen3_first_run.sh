@@ -1,17 +1,8 @@
 #!/bin/bash
 set -euo pipefail
-
-MODE="${1:-help}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/study.qwen3_30b_a3b.local.yaml}"
-DEFAULT_CONFIG="$ROOT_DIR/configs/study.qwen3_30b_a3b.initial.yaml"
-export VLLM_SPEC="${VLLM_SPEC:-vllm}"
-
-ensure_local_config() {
-  if [[ ! -f "$CONFIG_PATH" ]]; then
-    cp "$DEFAULT_CONFIG" "$CONFIG_PATH"
-  fi
-}
+exec bash "$ROOT_DIR/scripts/_run_study.sh" "${1:-help}" \
+    "$ROOT_DIR/configs/study.qwen3_30b_a3b.local.yaml"
 
 case "$MODE" in
   dry-run)

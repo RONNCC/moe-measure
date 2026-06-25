@@ -36,9 +36,9 @@ def build_sbatch_command(config_path: Path, tp: int, ep: int, dry_run: bool = Fa
     cfg = load_study_config(config_path)
     slurm = cfg.slurm
     world_size = tp * ep
-    nodes = max(1, math.ceil(world_size / slurm.gpus_per_node))
-    out_dir = Path(cfg.output_root) / cfg.study_name / f"tp{tp}-ep{ep}"
-    logs_dir = Path(cfg.output_root) / cfg.study_name / "slurm-logs"
+    nodes = max(slurm.min_nodes, math.ceil(world_size / slurm.gpus_per_node))
+    out_dir = Path(cfg.output_root).expanduser() / cfg.study_name / f"tp{tp}-ep{ep}"
+    logs_dir = Path(cfg.output_root).expanduser() / cfg.study_name / "slurm-logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -69,19 +69,28 @@ def build_sbatch_command(config_path: Path, tp: int, ep: int, dry_run: bool = Fa
     workdir = _normalize_path_for_export(slurm.workdir, default=str(ROOT))
     venv = _normalize_path_for_export(slurm.venv)
     uv_env_dir = _normalize_path_for_export(slurm.uv_env_dir)
+    deepep_wheel = _normalize_path_for_export(slurm.deepep_wheel)
 
     export_bits = {
         "ALL": None,
         "STUDY_CONFIG": str(config_path.resolve()),
         "TP_SIZE": str(tp),
         "EP_SIZE": str(ep),
-        "OUT_DIR": str(out_dir.resolve()),
+        # Pass the base dir; the sbatch script appends {job_id}_tp{tp}-ep{ep}
+        "OUT_DIR_BASE": str(out_dir.parent.resolve()),
         "WORKDIR": workdir,
         "VENV": venv,
         "MODULES": " ".join(slurm.modules),
         "CPUS_PER_TASK": str(slurm.cpus_per_task),
-        "UV_ENV_DIR": uv_env_dir,
+        "SKIP_VLLM": "0",
     }
+    # Only export UV_ENV_DIR if it's an absolute path — if it contains '$' the
+    # value would be passed as a literal string by SLURM and $TMPDIR would never
+    # expand. Let the sbatch script default to ${TMPDIR}/moe-breakdown-venv instead.
+    if uv_env_dir and "$" not in uv_env_dir:
+        export_bits["UV_ENV_DIR"] = uv_env_dir
+    if deepep_wheel:
+        export_bits["DEEPEP_WHEEL"] = deepep_wheel
     export_arg = ",".join([k if v is None else f"{k}={v}" for k, v in export_bits.items()])
     cmd.append(f"--export={export_arg}")
     cmd.append(str((ROOT / "slurm" / "run_direct_moe_sweep.sbatch").resolve()))

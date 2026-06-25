@@ -37,4 +37,22 @@ if [[ "$SKIP_VLLM" != "1" ]]; then
   VLLM_SPEC="${VLLM_SPEC:-vllm}"
   uv pip install "$VLLM_SPEC"
 fi
+
+# DeepEP wheel: install NCCL 2.30.4+ (required for GIN APIs) then the wheel.
+# The wheel is a pre-built .so; no nvcc needed here.
+# Set LD_LIBRARY_PATH in your sbatch after activation so deep_ep.so finds libnccl.so.2.
+DEEPEP_WHEEL="${DEEPEP_WHEEL:-}"
+if [[ -n "$DEEPEP_WHEEL" ]]; then
+  # Expand glob in case the config uses a wildcard (e.g. deep_ep-*.whl).
+  DEEPEP_WHEEL_PATH=$(ls $DEEPEP_WHEEL 2>/dev/null | head -1 || true)
+  if [[ -z "$DEEPEP_WHEEL_PATH" ]]; then
+    echo "[uv] ERROR: DEEPEP_WHEEL set to '$DEEPEP_WHEEL' but no matching file found" >&2
+    exit 1
+  fi
+  echo "[uv] installing nvidia-nccl-cu13>=2.30.4 for DeepEP GIN backend"
+  uv pip install "nvidia-nccl-cu13>=2.30.4" --no-deps
+  echo "[uv] installing DeepEP wheel: $DEEPEP_WHEEL_PATH"
+  uv pip install --no-deps "$DEEPEP_WHEEL_PATH"
+fi
+
 touch "$READY_MARKER"

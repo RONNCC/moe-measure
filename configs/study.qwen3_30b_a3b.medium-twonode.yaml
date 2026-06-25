@@ -1,0 +1,70 @@
+study_name: qwen3-30b-a3b-medium-twonode
+all2all_backend: allgather_reducescatter
+output_root: ~/scratch/moe-breakdown-runs
+
+# Two-node companion to the medium study.
+# Tests the same routing-mode × token sweep as medium, but the all-to-all
+# crosses InfiniBand instead of NVLink.
+#
+# Parallel configs:
+#   tp1-ep2: 2 nodes × 1 GPU — smallest possible cross-node all-to-all
+#   tp1-ep4: 2 nodes × 2 GPUs — same EP degree as medium intra-node ep4,
+#            directly quantifies IB overhead vs NVLink
+#
+# Scheduling: only needs 1–2 free GPUs per node, easy to get.
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 42
+warmup_iters: 10
+measure_iters: 30
+collect_buckets: true
+bucket_profile_iters: 3
+bucket_full_events: false
+
+zipf_s: 1.0
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 1024
+  parallel:
+    tp: 1
+    ep: 2
+
+kernel_shapes:
+  - name: qwen3_30b_a3b_moe
+    hidden_size: 2048
+    intermediate_size: 768
+    num_experts: 128
+    topk: 8
+    dtype: bfloat16
+
+routing_modes:
+  - uniform
+  - zipfian
+  - random
+  - skewed-2x
+  - skewed-4x
+  - worst-case
+
+tokens: [64, 256, 1024, 4096, 16384]
+
+parallel_points:
+  - {tp: 1, ep: 2}   # 2 nodes × 1 GPU — cross-IB ep2
+  - {tp: 1, ep: 4}   # 2 nodes × 2 GPUs — cross-IB ep4 (compare vs intra-node ep4)
+
+slurm:
+  partition: ice-gpu
+  qos: coc-ice
+  time: 01:30:00
+  cpus_per_task: 8
+  gpus_per_node: 2
+  gpu_type: h100
+  use_gres: true
+  min_nodes: 2
+  modules: [gcc/12.3.0, python/3.11, cuda/12.1.1]
+  uv_env_dir: /storage/ice1/0/2/sghose7/moe-breakdown-venv

@@ -59,7 +59,7 @@ def ensure_distributed_env() -> DistributedEnv:
     )
 
 
-def init_vllm_distributed(tp_size: int, ep_size: int, backend: str = "nccl") -> DistributedEnv:
+def init_vllm_distributed(tp_size: int, ep_size: int, backend: str = "nccl", all2all_backend: str = "nccl") -> DistributedEnv:
     env = ensure_distributed_env()
     expected_world_size = tp_size * ep_size
     if env.world_size != expected_world_size:
@@ -74,12 +74,26 @@ def init_vllm_distributed(tp_size: int, ep_size: int, backend: str = "nccl") -> 
         init_distributed_environment,
     )
 
-    torch.cuda.set_device(env.local_rank)
+    # With --gpus-per-task=1, each process only sees cuda:0 via CUDA_VISIBLE_DEVICES.
+    # vLLM's CustomAllreduce (used for TP allreduce) calls can_device_access_peer()
+    # using global rank as device ID, which fails when only device 0 is visible.
+    # Disable it so vLLM falls back to NCCL allreduce.
+    try:
+        import vllm.distributed.device_communicators.custom_all_reduce as _car
+        _car._can_p2p = lambda rank, world_size: False
+    except Exception:
+        pass
+
+    # When srun uses --gpus-per-task=1, each process sees only 1 GPU (cuda:0)
+    # via CUDA_VISIBLE_DEVICES. Fall back to 0 if local_rank exceeds visible count.
+    visible_device_count = torch.cuda.device_count()
+    effective_local_rank = env.local_rank if env.local_rank < visible_device_count else 0
+    torch.cuda.set_device(effective_local_rank)
     init_distributed_environment(
         world_size=env.world_size,
         rank=env.rank,
         distributed_init_method="env://",
-        local_rank=env.local_rank,
+        local_rank=effective_local_rank,
         backend=backend,
     )
 
@@ -97,7 +111,15 @@ def init_vllm_distributed(tp_size: int, ep_size: int, backend: str = "nccl") -> 
         kwargs["enable_expert_parallel"] = ep_size > 1
     if "backend" in sig.parameters:
         kwargs["backend"] = backend
-    ensure_model_parallel_initialized(**kwargs)
+
+    from contextlib import nullcontext
+    try:
+        from .vllm_adapter import build_vllm_config, vllm_config_context
+        ctx = vllm_config_context(build_vllm_config(all2all_backend=all2all_backend, ep_size=ep_size))
+    except Exception:
+        ctx = nullcontext()
+    with ctx:
+        ensure_model_parallel_initialized(**kwargs)
     return env
 
 

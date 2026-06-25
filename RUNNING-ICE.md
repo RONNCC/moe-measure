@@ -2,6 +2,8 @@
 
 This is the **pinned first-run guide** for your current setup.
 
+Your `sinfo` output shows the ICE A100 nodes have **2 GPUs per node**, so the first-pass A100 workflow below is pinned to fit that hardware.
+
 It assumes:
 
 - repo path: `~/scratch/moe-breakdown`
@@ -191,7 +193,7 @@ Use this if you want to test the direct-kernel path before submitting more jobs.
 The active two-condition Qwen profile script uses at most 4 GPUs right now.
 
 ```bash
-salloc --qos=coc-ice --gres=gpu:a100:4 --cpus-per-task=8 --mem=96G --time=02:00:00
+salloc --qos=coc-ice --gres=gpu:a100:2 --cpus-per-task=8 --mem=96G --time=02:00:00
 ```
 
 Once the allocation starts:
@@ -292,7 +294,7 @@ Inside an active allocation with the env set up:
 cd ~/scratch/moe-breakdown
 source "$TMPDIR/moe-breakdown-venv/bin/activate"
 
-torchrun --nproc-per-node=4 python3 scripts/run_one_condition.py \
+torchrun --nproc-per-node=2 python3 scripts/run_one_condition.py \
   --shape-name qwen3_30b_a3b_moe \
   --hidden-size 2048 \
   --intermediate-size 768 \
@@ -302,7 +304,7 @@ torchrun --nproc-per-node=4 python3 scripts/run_one_condition.py \
   --activation silu \
   --all2all-backend deepep_low_latency \
   --tp-size 1 \
-  --ep-size 4 \
+  --ep-size 2 \
   --num-tokens 1024 \
   --alpha 4.0 \
   --warmup-iters 10 \
@@ -319,11 +321,11 @@ torchrun --nproc-per-node=4 python3 scripts/run_one_condition.py \
 cd ~/scratch/moe-breakdown
 source "$TMPDIR/moe-breakdown-venv/bin/activate"
 export PROFILE_RANK=0
-export NSYS_OUT_BASE=$PWD/nsys/qwen-ep4-a4-t1024
+export NSYS_OUT_BASE=$PWD/nsys/qwen-ep2-a4-t1024
 export NSYS_TRACE='cuda,nvtx,osrt'
 export NSYS_EXTRA_ARGS='--capture-range=nvtx'
 
-torchrun --nproc-per-node=4 bash scripts/wrap_nsys.sh python3 scripts/run_one_condition.py \
+torchrun --nproc-per-node=2 bash scripts/wrap_nsys.sh python3 scripts/run_one_condition.py \
   --shape-name qwen3_30b_a3b_moe \
   --hidden-size 2048 \
   --intermediate-size 768 \
@@ -333,7 +335,7 @@ torchrun --nproc-per-node=4 bash scripts/wrap_nsys.sh python3 scripts/run_one_co
   --activation silu \
   --all2all-backend deepep_low_latency \
   --tp-size 1 \
-  --ep-size 4 \
+  --ep-size 2 \
   --num-tokens 1024 \
   --alpha 4.0 \
   --warmup-iters 10 \
@@ -349,11 +351,11 @@ torchrun --nproc-per-node=4 bash scripts/wrap_nsys.sh python3 scripts/run_one_co
 cd ~/scratch/moe-breakdown
 source "$TMPDIR/moe-breakdown-venv/bin/activate"
 export PROFILE_RANK=0
-export NCU_OUT_BASE=$PWD/ncu/qwen-ep4-a4-t1024
+export NCU_OUT_BASE=$PWD/ncu/qwen-ep2-a4-t1024
 export NCU_SET=full
 export NCU_EXTRA_ARGS='--nvtx --nvtx-include moe_kernel_timed'
 
-torchrun --nproc-per-node=4 bash scripts/wrap_ncu.sh python3 scripts/run_one_condition.py \
+torchrun --nproc-per-node=2 bash scripts/wrap_ncu.sh python3 scripts/run_one_condition.py \
   --shape-name qwen3_30b_a3b_moe \
   --hidden-size 2048 \
   --intermediate-size 768 \
@@ -363,7 +365,7 @@ torchrun --nproc-per-node=4 bash scripts/wrap_ncu.sh python3 scripts/run_one_con
   --activation silu \
   --all2all-backend deepep_low_latency \
   --tp-size 1 \
-  --ep-size 4 \
+  --ep-size 2 \
   --num-tokens 1024 \
   --alpha 4.0 \
   --warmup-iters 10 \
@@ -398,10 +400,12 @@ This captures:
 
 # Active initial Qwen profile conditions
 
+Note: ICE on your account appears not to accept typed GRES like `gpu:a100:N`; the config is now pinned to untyped GRES, i.e. `--gres=gpu:N`.
+
 The current profile script runs exactly these first two conditions:
 
 1. `tp=1, ep=1, tokens=512, alpha=1.0`
-2. `tp=1, ep=4, tokens=1024, alpha=4.0`
+2. `tp=1, ep=2, tokens=1024, alpha=4.0`
 
 That is deliberate: validate the code path first.
 
@@ -426,7 +430,7 @@ slurm/profile_qwen3_30b_a3b_two_conditions.sbatch
 from:
 
 ```bash
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:a100:2
 ```
 
 to:
@@ -456,7 +460,7 @@ CONFIG_PATH=$PWD/configs/study.qwen3_30b_a3b.local.yaml bash scripts/submit_qwen
 ## Interactive validation after that
 
 ```bash
-salloc --qos=coc-ice --gres=gpu:a100:4 --cpus-per-task=8 --mem=96G --time=02:00:00
+salloc --qos=coc-ice --gres=gpu:a100:2 --cpus-per-task=8 --mem=96G --time=02:00:00
 cd ~/scratch/moe-breakdown
 export VLLM_SPEC='vllm'
 source scripts/setup_ice_env.sh

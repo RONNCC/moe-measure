@@ -13,7 +13,8 @@ set -euo pipefail
 # Local single-node usage (if you already have 4 visible GPUs):
 #   PROFILE_TOOL=nsys bash scripts/profile_qwen3_30b_a3b_two_conditions.sh
 #
-# On PACE, more common is to run this inside an interactive/batch allocation.
+# On ICE, more common is to run this inside an interactive/batch allocation.
+# Active conditions below are pinned to fit on a single 2-GPU A100 node.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -145,7 +146,7 @@ launch_condition() {
 launch_condition "01-ep1-balanced-tok512-alpha1" 1 1 512 1.0
 
 # Condition 2: EP-enabled communication case, should exercise cross-rank MoE dispatch.
-launch_condition "02-ep4-imbalanced-tok1024-alpha4" 1 4 1024 4.0
+launch_condition "02-ep2-imbalanced-tok1024-alpha4" 1 2 1024 4.0
 
 # ---------------------------------------------------------------------------
 # Additional conditions for later study expansion.

@@ -14,7 +14,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     study_root = Path(args.study_root)
-    csv_paths = sorted(study_root.glob("tp*-ep*/results.csv"))
+    # Dirs are named either tp{tp}-ep{ep} (legacy) or {job_id}_tp{tp}-ep{ep}
+    csv_paths = sorted(study_root.glob("*tp*-ep*/results.csv"))
     if not csv_paths:
         raise SystemExit(f"No results.csv files found under {study_root}")
 

@@ -1,2 +1,0 @@
-pyyaml>=6.0
-# Install torch and vllm separately for your CUDA/toolchain environment.

@@ -1,6 +1,6 @@
 study_name: qwen3-30b-a3b-initial
-all2all_backend: deepep_low_latency
-output_root: runs
+all2all_backend: allgather_reducescatter
+output_root: ~/scratch/moe-breakdown-runs
 
 # Qwen/Qwen3-30B-A3B MoE shape:
 # hidden_size=2048, moe_intermediate_size=768, num_experts=128,
@@ -39,17 +39,18 @@ tokens: [128, 512, 1024]
 
 parallel_points:
   - {tp: 1, ep: 1}
-  - {tp: 1, ep: 2}
+  - {tp: 1, ep: 4}
 
 slurm:
+  partition: ice-gpu
   qos: coc-ice
   time: 01:30:00
   cpus_per_task: 8
-  gpus_per_node: 2
-  gpu_type: a100
+  gpus_per_node: 8
+  gpu_type: h100
   use_gres: true
   mem: 96G
   modules: [gcc/12.3.0, python/3.11, cuda/12.1.1]
-  workdir: /home/$USER/scratch/moe-breakdown
-  uv_env_dir: $TMPDIR/moe-breakdown-venv
+  workdir: /home/hice1/sghose7/moe-breakdown
+  uv_env_dir: ~/scratch/moe-breakdown-venv
   extra_sbatch_args: []

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=qwen3-a3b-profile
 #SBATCH --qos=coc-ice
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:a100:2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=02:00:00
@@ -52,7 +52,7 @@ export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPUS_PER_TASK}"
 export PROFILE_TOOL
 
-# Active script uses up to 4 GPUs. If you uncomment the 8-GPU examples,
-# change #SBATCH --gres=gpu:a100:4 above to 8.
+# Active script uses up to 2 GPUs on one A100 node.
+# If you later uncomment multi-node / larger EP examples, adjust this file accordingly.
 
 bash "$ROOT_DIR/scripts/profile_qwen3_30b_a3b_two_conditions.sh"
