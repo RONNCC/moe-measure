@@ -62,7 +62,7 @@ fi
 # deep_ep is compiled against nvidia-nccl-cu13; its rpath points to the build-time
 # venv, so we override with the active venv's location here.
 if python -c "import nvidia.nccl" 2>/dev/null; then
-  NCCL_LIB_DIR=$(python -c "import os, nvidia.nccl; print(os.path.join(os.path.dirname(nvidia.nccl.__file__), 'lib'))")
+  NCCL_LIB_DIR=$(python -c "import nvidia.nccl, os; base = getattr(nvidia.nccl, '__file__', None) or list(nvidia.nccl.__path__)[0]; print(os.path.join(os.path.dirname(base), 'lib'))")
   export LD_LIBRARY_PATH="${NCCL_LIB_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   echo "[slurm] LD_LIBRARY_PATH set for NCCL: $NCCL_LIB_DIR"
 fi
