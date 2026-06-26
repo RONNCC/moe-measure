@@ -138,6 +138,8 @@ def summarize_timings_ms(timings_ms: list[float]) -> dict[str, float]:
         "max_ms": float(max(timings_ms)),
         "p05_ms": _percentile(timings_ms, 0.05),
         "p95_ms": _percentile(timings_ms, 0.95),
+        "p99_ms": _percentile(timings_ms, 0.99),
+        "std_ms": float(statistics.stdev(timings_ms)) if len(timings_ms) > 1 else 0.0,
     }
 
 
@@ -462,6 +464,8 @@ def run_condition(
         float(statistics.stdev(item["timings_ms"])) if len(item["timings_ms"]) > 1 else 0.0
         for item in per_rank
     ]
+    rank_p99s = [float(item.get("p99_ms", float("nan"))) for item in per_rank]
+    rank_std_from_summary = [float(item.get("std_ms", 0.0)) for item in per_rank]
 
     summary = {
         "study_name": cfg.study_name,
@@ -489,6 +493,8 @@ def run_condition(
         "latency_p95_ms_max_rank": max(rank_p95),
         "latency_p05_ms_max_rank": max(rank_p05),
         "latency_std_ms_max_rank": max(rank_stds),
+        "latency_p99_ms_max_rank": max(r for r in rank_p99s if not math.isnan(r)) if any(not math.isnan(r) for r in rank_p99s) else float("nan"),
+        "latency_std_ms_mean_across_ranks": float(statistics.mean(rank_std_from_summary)),
         "per_rank": per_rank,
         "routing_counts": routing.stats.counts,
         "routing_probabilities": routing.stats.probabilities,
@@ -537,6 +543,13 @@ def run_parallel_point(
             "tp": parallel_tp,
             "ep": parallel_ep,
         })
+
+    nccl_log_dir = None
+    if cfg.all2all_backend not in ("none",):
+        nccl_log_dir = ensure_dir(out_dir / "nccl_logs")
+        nccl_log_file = str(nccl_log_dir / f"nccl_rank{env.rank}.log")
+        os.environ.setdefault("NCCL_DEBUG", "INFO")
+        os.environ.setdefault("NCCL_DEBUG_FILE", nccl_log_file)
 
     rows: list[dict[str, Any]] = []
     from .config import ParallelPoint, make_conditions
@@ -589,3 +602,27 @@ def run_parallel_point(
     if env.rank == 0:
         write_csv(out_dir / "results.csv", rows)
         write_json(out_dir / "results_summary.json", {"rows": rows, "num_rows": len(rows)})
+
+    if env.rank == 0 and nccl_log_dir is not None:
+        nccl_summary: dict[str, Any] = {"rank_files": []}
+        for log_path in sorted(nccl_log_dir.glob("*.log")):
+            bytes_total = 0
+            op_counts: dict[str, int] = {}
+            try:
+                for line in log_path.read_text(errors="replace").splitlines():
+                    # NCCL INFO lines look like: "NCCL INFO AllReduce: opCount ... count 1024 datatype ... nBytes 8192"
+                    if "nBytes" in line:
+                        parts = line.split("nBytes")
+                        if len(parts) > 1:
+                            try:
+                                nb = int(parts[1].split()[1])
+                                bytes_total += nb
+                            except (IndexError, ValueError):
+                                pass
+                    for op in ("AllReduce", "AllGather", "ReduceScatter", "Send", "Recv", "Broadcast"):
+                        if op in line:
+                            op_counts[op] = op_counts.get(op, 0) + 1
+            except Exception:
+                pass
+            nccl_summary["rank_files"].append({"file": str(log_path), "bytes_total": bytes_total, "op_counts": op_counts})
+        write_json(out_dir / "nccl_summary.json", nccl_summary)
