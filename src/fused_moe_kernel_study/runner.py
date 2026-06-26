@@ -257,6 +257,66 @@ def _kernel_call_kwargs(
     return kwargs
 
 
+# Hardware constants for H100 SXM5
+H100_TFLOPS_BF16 = 989.0          # BF16 TFLOPS (sparsity off)
+H100_HBM_BW_TBYPS = 3.35          # HBM bandwidth in TB/s
+H100_FLOPS_PER_BYTE = H100_TFLOPS_BF16 / H100_HBM_BW_TBYPS  # ~295.2
+
+
+def _derived_columns(summary: dict[str, Any]) -> dict[str, Any]:
+    """Compute derived analytical columns from a condition summary dict."""
+    tokens: int = int(summary["tokens"])
+    hidden_size: int = int(summary["hidden_size"])
+    intermediate_size: int = int(summary["intermediate_size"])
+    num_experts: int = int(summary["num_experts"])
+    topk: int = int(summary["topk"])
+    ep: int = int(summary["ep"])
+    tp: int = int(summary["tp"])
+
+    bytes_per_element = 2  # bfloat16
+
+    # Expert weight bytes held by this GPU's local experts
+    num_local_experts = num_experts // ep
+    w1_bytes = num_local_experts * 2 * intermediate_size * hidden_size * bytes_per_element // tp
+    w2_bytes = num_local_experts * intermediate_size * hidden_size * bytes_per_element // tp
+    expert_weight_bytes_per_gpu = w1_bytes + w2_bytes
+
+    # Theoretical dispatch bytes (allgather of input hidden states across EP ranks)
+    dispatch_bytes_theoretical = tokens * hidden_size * bytes_per_element * (ep - 1) / ep
+
+    # Expert GEMM FLOPs (across all locally assigned tokens, averaged)
+    tokens_per_expert_avg = tokens * topk / num_experts
+    flops_per_expert = 2 * tokens_per_expert_avg * (2 * intermediate_size * hidden_size)
+    expert_GEMM_flops = flops_per_expert * num_local_experts
+
+    # Arithmetic intensity (FLOP/byte) — roofline x-axis
+    if expert_weight_bytes_per_gpu > 0:
+        expert_GEMM_AMI = expert_GEMM_flops / expert_weight_bytes_per_gpu
+    else:
+        expert_GEMM_AMI = float("inf")
+
+    # Roofline prediction: compute-bound if AMI >= H100 ops-per-byte ridge point
+    compute_bound_predicted = int(expert_GEMM_AMI >= H100_FLOPS_PER_BYTE)
+
+    # Imbalance ratio (corrected)
+    imbalance_ratio_alpha = float(summary["alpha_observed"])
+
+    # Theoretical allgather network bytes (lower bound)
+    allgather_send_bytes = tokens * hidden_size * bytes_per_element
+    allgather_recv_bytes = tokens * hidden_size * bytes_per_element * (ep - 1)
+
+    return {
+        "expert_weight_bytes_per_gpu": expert_weight_bytes_per_gpu,
+        "dispatch_bytes_theoretical": dispatch_bytes_theoretical,
+        "expert_GEMM_flops": expert_GEMM_flops,
+        "expert_GEMM_AMI": expert_GEMM_AMI,
+        "compute_bound_predicted": compute_bound_predicted,
+        "imbalance_ratio_alpha": imbalance_ratio_alpha,
+        "allgather_send_bytes": allgather_send_bytes,
+        "allgather_recv_bytes": allgather_recv_bytes,
+    }
+
+
 def run_condition(
     *,
     cfg: StudyConfig,
@@ -396,6 +456,12 @@ def run_condition(
     per_rank = [item for item in gathered if item is not None]
     rank_medians = [float(item["median_ms"]) for item in per_rank]
     rank_means = [float(item["mean_ms"]) for item in per_rank]
+    rank_p95 = [float(item["p95_ms"]) for item in per_rank]
+    rank_p05 = [float(item["p05_ms"]) for item in per_rank]
+    rank_stds = [
+        float(statistics.stdev(item["timings_ms"])) if len(item["timings_ms"]) > 1 else 0.0
+        for item in per_rank
+    ]
 
     summary = {
         "study_name": cfg.study_name,
@@ -420,6 +486,9 @@ def run_condition(
         "latency_mean_ms_max_rank": max(rank_means),
         "latency_median_ms_mean_across_ranks": float(statistics.mean(rank_medians)),
         "latency_mean_ms_mean_across_ranks": float(statistics.mean(rank_means)),
+        "latency_p95_ms_max_rank": max(rank_p95),
+        "latency_p05_ms_max_rank": max(rank_p05),
+        "latency_std_ms_max_rank": max(rank_stds),
         "per_rank": per_rank,
         "routing_counts": routing.stats.counts,
         "routing_probabilities": routing.stats.probabilities,
@@ -440,6 +509,7 @@ def run_condition(
         write_json(bucket_path, bucket_profile)
 
     row = {k: v for k, v in summary.items() if k not in {"per_rank", "routing_counts", "routing_probabilities"}}
+    row.update(_derived_columns(summary))
     row["per_rank_path"] = str(rank_path)
     row["bucket_profile_path"] = str(bucket_path) if bucket_path is not None else ""
     if bucket_profile is not None:

@@ -61,6 +61,7 @@ def make_routing_batch(
 
     # Determine probability vector and effective alpha for stats.
     # For "worst-case" mode we skip multinomial entirely.
+    observed_alpha_override: float | None = None
     if routing_mode == "alpha":
         probs = make_probability_vector(num_experts, alpha, hot_expert_count=hot_expert_count, device=device)
         effective_alpha = float(alpha)
@@ -95,8 +96,10 @@ def make_routing_batch(
         topk_ids = torch.arange(topk, dtype=topk_index_dtype, device=device).expand(num_tokens, -1).contiguous()
         probs = torch.zeros(num_experts, dtype=torch.float64, device=device)
         probs[:topk] = 1.0 / topk
-        effective_alpha = 1.0
+        # Maximum imbalance: only topk out of num_experts experts receive traffic.
+        effective_alpha = float(num_experts) / float(topk)
         use_direct_ids = True
+        observed_alpha_override = float(num_experts) / float(topk)
     else:
         raise ValueError(f"Unsupported routing_mode={routing_mode!r}")
 
@@ -123,6 +126,8 @@ def make_routing_batch(
     max_count = int(counts.max().item())
     min_positive = int(counts[counts > 0].min().item()) if torch.any(counts > 0) else 0
     observed_alpha = float(max_count / min_positive) if min_positive > 0 else float("inf")
+    if observed_alpha_override is not None:
+        observed_alpha = observed_alpha_override
 
     stats = RoutingStats(
         requested_alpha=effective_alpha,
