@@ -17,3 +17,6 @@ venv/
 .DS_Store
 *.swp
 ~/
+
+# Claude Code internal state
+.claude/
