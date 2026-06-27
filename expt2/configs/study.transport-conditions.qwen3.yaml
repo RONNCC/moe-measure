@@ -84,11 +84,11 @@ slurm:
   time: 02:00:00
   cpus_per_task: 8
   gpus_per_node: 4
-  gpu_type: h100
+  gpu_type: h200
   use_gres: true
   mem: 64G
   modules: [gcc/12.3.0, python/3.11, cuda/12.1.1]
   workdir: /home/hice1/sghose7/moe-breakdown
   uv_env_dir: ~/scratch/moe-breakdown-venv
   extra_sbatch_args:
-    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"
+    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"
