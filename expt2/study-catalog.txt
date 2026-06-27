@@ -1,0 +1,108 @@
+================================================================================
+EXPT2: NCCL Transport Condition Degradation Study — Running Catalog
+Last updated: 2026-06-26
+================================================================================
+
+STUDY DESIGN
+------------
+Goal: Quantify how much fused-MoE latency depends on fast GPU P2P communication
+(NVSwitch/NVLink) vs. PCIe fallback, by intentionally degrading NCCL transport.
+
+Shape: Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
+Backend: allgather_reducescatter
+Routing: uniform (fixed for isolation)
+Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192] (decode+prefill regimes)
+Warmup: 30 iters | Measure: 100 iters | Seed: 42
+
+Transport conditions (NCCL env vars):
+  nvlink_default     : no env vars (NVLink/NVSwitch baseline, ~900 GB/s)
+  no_nvls_no_p2p     : NCCL_NVLS_ENABLE=0, NCCL_P2P_DISABLE=1 (PCIe fallback)
+  no_nvls_no_p2p_1ch : above + NCCL_MAX_NCHANNELS=1 (single-channel PCIe)
+
+Parallel points:
+  tp1-ep1  : no inter-GPU collective (control — all transport conditions = identical)
+  tp1-ep2  : onset of transport sensitivity
+  tp1-ep4  : max EP on 4-GPU node
+  tp2-ep2  : TP allreduce + EP allgather both active
+
+Total planned: 3 transport × 4 parallel × 11 tokens = 132 conditions
+
+Config: expt2/configs/study.transport-conditions.qwen3.yaml
+Cluster output: /storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/
+SLURM logs: ~/scratch/moe-breakdown-runs/expt2/transport-conditions-qwen3/slurm-logs/
+
+KNOWN BAD NODES (excluded from all submissions)
+-------------------------------------------------
+atl1-1-03-013-3-0   : NCCL/GPU failure (expt1)
+atl1-1-03-013-8-0   : NCCL/GPU failure (expt1) — NOTE: shows idle in sinfo 2026-06-26, may be repaired
+atl1-1-03-013-13-0  : NCCL/GPU failure (expt1)
+atl1-1-03-012-18-0  : Gloo TCP timeout + NCCL CUDA error (expt1 reruns 5436972, 5437013)
+atl1-1-03-012-23-0  : NCCL CUDA error on multi-GPU jobs (expt2 batch 1, added 2026-06-26)
+
+WHAT'S NEEDED TO COMPLETE THE STUDY
+--------------------------------------
+All 12 jobs must complete successfully:
+  nvlink_default   × {tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2}
+  no_nvls_no_p2p   × {tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2}
+  no_nvls_no_p2p_1ch × {tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2}
+
+ep=1 jobs are controls (no NCCL collective) — should show identical latency across
+all 3 transport conditions, validating measurement setup.
+
+================================================================================
+JOB HISTORY
+================================================================================
+
+--- BATCH 1 (submitted 2026-06-26, IDs 5438293–5438304, bad node list v1) ---
+NOTE: Batch 1 excluded atl1-1-03-013-3/8/13-0 and atl1-1-03-012-18-0 but NOT
+      atl1-1-03-012-23-0 (not yet known bad). MASTER_PORT fixed at 29500.
+
+5438293  nvlink_default-tp1-ep1    FAILED   atl1-1-03-012-23-0  EADDRINUSE port 29500 (two ep=1 jobs same node)
+5438294  nvlink_default-tp1-ep2    FAILED   atl1-1-03-012-23-0  NCCL error: unhandled cuda error (bad GPU)
+5438295  nvlink_default-tp1-ep4    CANCELLED (pending when batch 2 submitted)
+5438296  nvlink_default-tp2-ep2    CANCELLED (pending when batch 2 submitted)
+5438297  no_nvls_no_p2p-tp1-ep1    COMPLETED atl1-1-03-012-23-0  SUCCESS (ep=1 needs no NCCL, ran fine)
+5438298  no_nvls_no_p2p-tp1-ep2    FAILED   atl1-1-03-012-23-0  NCCL error: unhandled cuda error (bad GPU)
+5438299  no_nvls_no_p2p-tp1-ep4    CANCELLED (pending when batch 2 submitted)
+5438300  no_nvls_no_p2p-tp2-ep2    CANCELLED (pending when batch 2 submitted)
+5438301  no_nvls_no_p2p_1ch-tp1-ep1 FAILED  atl1-1-03-012-23-0  NCCL error (same node, likely port race)
+5438302  no_nvls_no_p2p_1ch-tp1-ep2 FAILED  atl1-1-03-012-23-0  NCCL error: unhandled cuda error
+5438303  no_nvls_no_p2p_1ch-tp1-ep4 CANCELLED (pending when batch 2 submitted)
+5438304  no_nvls_no_p2p_1ch-tp2-ep2 CANCELLED (pending when batch 2 submitted)
+
+Lesson: atl1-1-03-012-23-0 has a bad GPU. Added to exclude list. Also randomized
+        MASTER_PORT to avoid port conflicts when multiple ep=1 jobs share a node.
+
+--- BATCH 2 (submitted 2026-06-26, IDs 5438371–5438382, bad node list v2) ---
+NOTE: Added atl1-1-03-012-23-0 to exclude. MASTER_PORT = 29500 + (SLURM_JOB_ID % 10000).
+STATUS AS OF 2026-06-26 ~22:15: ALL PENDING — ReqNodeNotAvail
+PROBLEM: H100 pool nearly exhausted.
+  - atl1-1-03-012-28-0: drained (not available)
+  - atl1-1-03-012-18-0 + 3 others (mixed): all in our exclude list
+  - atl1-1-03-013-8-0: idle BUT in our exclude list (was bad in expt1)
+NEXT ACTION: If still stuck after 10 min, try removing atl1-1-03-013-8-0 from
+             exclude (it shows idle, may have been repaired). Cancel batch 2 and
+             resubmit batch 3 with updated exclude list.
+
+5438371  nvlink_default-tp1-ep1    PENDING  ReqNodeNotAvail
+5438372  nvlink_default-tp1-ep2    PENDING  ReqNodeNotAvail
+5438373  nvlink_default-tp1-ep4    PENDING  ReqNodeNotAvail
+5438374  nvlink_default-tp2-ep2    PENDING  ReqNodeNotAvail
+5438375  no_nvls_no_p2p-tp1-ep1    PENDING  ReqNodeNotAvail
+5438376  no_nvls_no_p2p-tp1-ep2    PENDING  ReqNodeNotAvail
+5438377  no_nvls_no_p2p-tp1-ep4    PENDING  ReqNodeNotAvail
+5438378  no_nvls_no_p2p-tp2-ep2    PENDING  ReqNodeNotAvail
+5438379  no_nvls_no_p2p_1ch-tp1-ep1 PENDING ReqNodeNotAvail
+5438380  no_nvls_no_p2p_1ch-tp1-ep2 PENDING ReqNodeNotAvail
+5438381  no_nvls_no_p2p_1ch-tp1-ep4 PENDING ReqNodeNotAvail
+5438382  no_nvls_no_p2p_1ch-tp2-ep2 PENDING ReqNodeNotAvail
+
+================================================================================
+COMPLETED RESULTS (usable data)
+================================================================================
+
+5438297  no_nvls_no_p2p-tp1-ep1   COMPLETED  (ep=1 control with degraded transport)
+  Output: /storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/no_nvls_no_p2p/
+  Note: ep=1 = no inter-GPU collective, so transport condition doesn't matter here.
+        This data point is valid but we still need nvlink_default-tp1-ep1 and
+        no_nvls_no_p2p_1ch-tp1-ep1 to confirm all three ep=1 controls agree.
