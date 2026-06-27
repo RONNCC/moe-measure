@@ -123,6 +123,14 @@ Status ~30s after submit:
 Progress: 4 RUNNING, 8 PENDING (Resources — healthy). Node 8-0 confirmed working.
 Next check: ~19:58 PDT.
 
+--- CHECK 2026-06-26 19:58 PDT — VPN FAILURE ---
+3 consecutive SSH timeouts to login-ice.pace.gatech.edu. Monitor loop stopped per policy.
+Last known good state (19:48 PDT): 4 jobs RUNNING on atl1-1-03-013-8-0, 8 PENDING (Resources).
+Jobs 5438423-5438434 were in healthy state when VPN dropped.
+ACTION NEEDED: VPN is down. Reconnect VPN and restart the monitor manually with:
+  /loop (or ask Claude to restart the 10-min cron)
+Crons d0e1aaf5 and b927d3f9 have been deleted.
+
 ================================================================================
 COMPLETED RESULTS (usable data)
 ================================================================================
