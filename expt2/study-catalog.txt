@@ -131,6 +131,48 @@ ACTION NEEDED: VPN is down. Reconnect VPN and restart the monitor manually with:
   /loop (or ask Claude to restart the 10-min cron)
 Crons d0e1aaf5 and b927d3f9 have been deleted.
 
+--- BATCH 3 FINAL RESULTS ---
+Completed (ep=1 controls, no inter-GPU NCCL needed):
+  5438423  nvlink_default-tp1-ep1      COMPLETED  atl1-1-03-013-8-0
+  5438427  no_nvls_no_p2p-tp1-ep1      COMPLETED  atl1-1-03-013-8-0
+  5438431  no_nvls_no_p2p_1ch-tp1-ep1  COMPLETED  atl1-1-03-013-8-0
+Failed (all multi-GPU jobs): NCCL error unhandled cuda error on atl1-1-03-013-8-0.
+  ep=1 works (1 GPU only), ep>=2 fails — confirms some GPUs on that node are broken.
+Added atl1-1-03-013-8-0 back to exclude list.
+
+--- HARDWARE SWITCH: H100 → H200 (2026-06-27 morning) ---
+ALL H100 nodes on PACE ICE have bad GPUs for multi-GPU NCCL. Known bad H100 pool:
+  atl1-1-03-012-18-0, atl1-1-03-012-23-0, atl1-1-03-013-3-0,
+  atl1-1-03-013-8-0 (ep=1 OK, ep>=2 broken), atl1-1-03-013-13-0
+  atl1-1-03-012-28-0: drained
+Switched to H200 (atl1-1-03-017-30-0, atl1-1-03-018-2-0): same ice-gpu partition,
+same coc-ice QOS, NVSwitch architecture identical. Research question equally valid on H200.
+NOTE: Absolute latency numbers will differ from H100 (H200 has higher HBM bandwidth),
+      but slowdown ratios (degraded/baseline) are the key metric — hardware-independent.
+Config commit: 9994764
+
+--- BATCH 4 (submitted 2026-06-27, IDs 5439956–5439967, H200, bad node list v4) ---
+Exclude list: atl1-1-03-013-3-0, atl1-1-03-013-8-0, atl1-1-03-013-13-0,
+              atl1-1-03-012-18-0, atl1-1-03-012-23-0
+Hardware: H200 (gpu:h200:N gres)
+
+--- CHECK 2026-06-27 ~07:30 PDT ---
+Status ~30s after submit:
+5439956  nvlink_default-tp1-ep1      RUNNING  atl1-1-03-017-30-0  (ep=1 control)
+5439957  nvlink_default-tp1-ep2      RUNNING  atl1-1-03-017-30-0
+5439958  nvlink_default-tp1-ep4      RUNNING  atl1-1-03-017-30-0
+5439959  nvlink_default-tp2-ep2      RUNNING  atl1-1-03-018-2-0
+5439960  no_nvls_no_p2p-tp1-ep1      RUNNING  atl1-1-03-017-30-0  (ep=1 control)
+5439961  no_nvls_no_p2p-tp1-ep2      RUNNING  atl1-1-03-018-2-0
+5439962  no_nvls_no_p2p-tp1-ep4      PENDING  (Resources — waiting for GPU)
+5439963  no_nvls_no_p2p-tp2-ep2      PENDING  (Resources)
+5439964  no_nvls_no_p2p_1ch-tp1-ep1  RUNNING  atl1-1-03-018-2-0  (ep=1 control)
+5439965  no_nvls_no_p2p_1ch-tp1-ep2  PENDING  (Resources)
+5439966  no_nvls_no_p2p_1ch-tp1-ep4  PENDING  (Resources)
+5439967  no_nvls_no_p2p_1ch-tp2-ep2  PENDING  (Resources)
+Progress: 7 RUNNING (including multi-GPU!), 5 PENDING (Resources — healthy).
+H200 working perfectly. Monitor restarting.
+
 ================================================================================
 COMPLETED RESULTS (usable data)
 ================================================================================
