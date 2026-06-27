@@ -34,7 +34,7 @@ SLURM logs: ~/scratch/moe-breakdown-runs/expt2/transport-conditions-qwen3/slurm-
 KNOWN BAD NODES (excluded from all submissions)
 -------------------------------------------------
 atl1-1-03-013-3-0   : NCCL/GPU failure (expt1)
-atl1-1-03-013-8-0   : NCCL/GPU failure (expt1) — NOTE: shows idle in sinfo 2026-06-26, may be repaired
+atl1-1-03-013-8-0   : NCCL/GPU failure (expt1) — REMOVED FROM EXCLUDE 2026-06-26 19:48 PDT: node shows mixed/active, jobs running on it successfully (batch 3)
 atl1-1-03-013-13-0  : NCCL/GPU failure (expt1)
 atl1-1-03-012-18-0  : Gloo TCP timeout + NCCL CUDA error (expt1 reruns 5436972, 5437013)
 atl1-1-03-012-23-0  : NCCL CUDA error on multi-GPU jobs (expt2 batch 1, added 2026-06-26)
@@ -96,6 +96,32 @@ NEXT ACTION: If still stuck after 10 min, try removing atl1-1-03-013-8-0 from
 5438380  no_nvls_no_p2p_1ch-tp1-ep2 PENDING ReqNodeNotAvail
 5438381  no_nvls_no_p2p_1ch-tp1-ep4 PENDING ReqNodeNotAvail
 5438382  no_nvls_no_p2p_1ch-tp2-ep2 PENDING ReqNodeNotAvail
+
+--- BATCH 2 CANCELLED 2026-06-26 19:48 PDT ---
+All 12 batch 2 jobs cancelled (ReqNodeNotAvail — entire H100 pool was in exclude list).
+Action: removed atl1-1-03-013-8-0 from exclude (node was mixed/active = repaired).
+Updated YAML: commit 012c283.
+
+--- BATCH 3 (submitted 2026-06-26 19:48 PDT, IDs 5438423–5438434, bad node list v3) ---
+Exclude list: atl1-1-03-013-3-0, atl1-1-03-013-13-0, atl1-1-03-012-18-0, atl1-1-03-012-23-0
+(atl1-1-03-013-8-0 re-allowed — confirmed working)
+
+--- CHECK 2026-06-26 19:48 PDT ---
+Status ~30s after submit:
+5438423  nvlink_default-tp1-ep1      RUNNING  atl1-1-03-013-8-0
+5438424  nvlink_default-tp1-ep2      RUNNING  atl1-1-03-013-8-0
+5438425  nvlink_default-tp1-ep4      PENDING  (Resources)
+5438426  nvlink_default-tp2-ep2      PENDING  (Resources)
+5438427  no_nvls_no_p2p-tp1-ep1      RUNNING  atl1-1-03-013-8-0
+5438428  no_nvls_no_p2p-tp1-ep2      RUNNING  atl1-1-03-013-8-0
+5438429  no_nvls_no_p2p-tp1-ep4      PENDING  (Resources)
+5438430  no_nvls_no_p2p-tp2-ep2      PENDING  (Resources)
+5438431  no_nvls_no_p2p_1ch-tp1-ep1  PENDING  (Resources)
+5438432  no_nvls_no_p2p_1ch-tp1-ep2  PENDING  (Resources)
+5438433  no_nvls_no_p2p_1ch-tp1-ep4  PENDING  (Resources)
+5438434  no_nvls_no_p2p_1ch-tp2-ep2  PENDING  (Resources)
+Progress: 4 RUNNING, 8 PENDING (Resources — healthy). Node 8-0 confirmed working.
+Next check: ~19:58 PDT.
 
 ================================================================================
 COMPLETED RESULTS (usable data)
