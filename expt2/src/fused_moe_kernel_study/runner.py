@@ -479,6 +479,7 @@ def run_condition(
         "alpha_requested": cond.alpha,
         "alpha_observed": routing.stats.observed_alpha,
         "backend": cfg.all2all_backend,
+        "transport_condition": os.environ.get("TRANSPORT_CONDITION", "nvlink_default"),
         "dtype": cond.shape.dtype,
         "hidden_size": cond.shape.hidden_size,
         "intermediate_size": cond.shape.intermediate_size,
