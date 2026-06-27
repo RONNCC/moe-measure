@@ -67,7 +67,7 @@ fi
 
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPUS_PER_TASK}"
-export MASTER_PORT="${MASTER_PORT:-29500}"
+export MASTER_PORT="${MASTER_PORT:-$((29500 + SLURM_JOB_ID % 10000))}"
 
 if [[ -z "${MASTER_ADDR:-}" && -n "${SLURM_NODELIST:-}" ]]; then
   export MASTER_ADDR
