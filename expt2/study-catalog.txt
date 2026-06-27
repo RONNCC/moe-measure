@@ -1,184 +1,76 @@
 ================================================================================
-EXPT2: NCCL Transport Condition Degradation Study — Running Catalog
-Last updated: 2026-06-26
+EXPT2: NCCL Transport Condition Degradation Study — Catalog
+Last updated: 2026-06-27
 ================================================================================
 
 STUDY DESIGN
 ------------
-Goal: Quantify how much fused-MoE latency depends on fast GPU P2P communication
+Goal: Quantify how much fused-MoE latency depends on GPU P2P communication
 (NVSwitch/NVLink) vs. PCIe fallback, by intentionally degrading NCCL transport.
 
 Shape: Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
 Backend: allgather_reducescatter
 Routing: uniform (fixed for isolation)
-Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192] (decode+prefill regimes)
+Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192]
 Warmup: 30 iters | Measure: 100 iters | Seed: 42
 
-Transport conditions (NCCL env vars):
-  nvlink_default     : no env vars (NVLink/NVSwitch baseline, ~900 GB/s)
-  no_nvls_no_p2p     : NCCL_NVLS_ENABLE=0, NCCL_P2P_DISABLE=1 (PCIe fallback)
+Transport conditions:
+  nvlink_default     : no env vars (NVLink/NVSwitch baseline)
+  no_nvls_no_p2p     : NCCL_NVLS_ENABLE=0 + NCCL_P2P_DISABLE=1 (PCIe fallback)
   no_nvls_no_p2p_1ch : above + NCCL_MAX_NCHANNELS=1 (single-channel PCIe)
 
 Parallel points:
-  tp1-ep1  : no inter-GPU collective (control — all transport conditions = identical)
+  tp1-ep1  : control (no inter-GPU collective — identical across all transport conditions)
   tp1-ep2  : onset of transport sensitivity
   tp1-ep4  : max EP on 4-GPU node
   tp2-ep2  : TP allreduce + EP allgather both active
 
-Total planned: 3 transport × 4 parallel × 11 tokens = 132 conditions
+Total: 3 transport × 4 parallel points = 12 SLURM jobs, 132 benchmark conditions
+
+Hardware target: PACE ICE H200 SXM5 (atl1-1-03-017-30-0, atl1-1-03-018-2-0)
+  Note: H100 nodes all have bad GPUs (see KNOWN ISSUES below). H200 has same
+  NVSwitch architecture so results are equivalent for this study.
 
 Config: expt2/configs/study.transport-conditions.qwen3.yaml
 Cluster output: /storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/
 SLURM logs: ~/scratch/moe-breakdown-runs/expt2/transport-conditions-qwen3/slurm-logs/
 
-KNOWN BAD NODES (excluded from all submissions)
--------------------------------------------------
-atl1-1-03-013-3-0   : NCCL/GPU failure (expt1)
-atl1-1-03-013-8-0   : NCCL/GPU failure (expt1) — REMOVED FROM EXCLUDE 2026-06-26 19:48 PDT: node shows mixed/active, jobs running on it successfully (batch 3)
-atl1-1-03-013-13-0  : NCCL/GPU failure (expt1)
-atl1-1-03-012-18-0  : Gloo TCP timeout + NCCL CUDA error (expt1 reruns 5436972, 5437013)
-atl1-1-03-012-23-0  : NCCL CUDA error on multi-GPU jobs (expt2 batch 1, added 2026-06-26)
-
-WHAT'S NEEDED TO COMPLETE THE STUDY
---------------------------------------
-All 12 jobs must complete successfully:
-  nvlink_default   × {tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2}
-  no_nvls_no_p2p   × {tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2}
-  no_nvls_no_p2p_1ch × {tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2}
-
-ep=1 jobs are controls (no NCCL collective) — should show identical latency across
-all 3 transport conditions, validating measurement setup.
-
 ================================================================================
-JOB HISTORY
+KNOWN ISSUES (blocking multi-GPU jobs)
 ================================================================================
 
---- BATCH 1 (submitted 2026-06-26, IDs 5438293–5438304, bad node list v1) ---
-NOTE: Batch 1 excluded atl1-1-03-013-3/8/13-0 and atl1-1-03-012-18-0 but NOT
-      atl1-1-03-012-23-0 (not yet known bad). MASTER_PORT fixed at 29500.
+CLUSTER-WIDE NCCL BUG: multi-GPU NCCL fails on both H100 and H200 nodes.
 
-5438293  nvlink_default-tp1-ep1    FAILED   atl1-1-03-012-23-0  EADDRINUSE port 29500 (two ep=1 jobs same node)
-5438294  nvlink_default-tp1-ep2    FAILED   atl1-1-03-012-23-0  NCCL error: unhandled cuda error (bad GPU)
-5438295  nvlink_default-tp1-ep4    CANCELLED (pending when batch 2 submitted)
-5438296  nvlink_default-tp2-ep2    CANCELLED (pending when batch 2 submitted)
-5438297  no_nvls_no_p2p-tp1-ep1    COMPLETED atl1-1-03-012-23-0  SUCCESS (ep=1 needs no NCCL, ran fine)
-5438298  no_nvls_no_p2p-tp1-ep2    FAILED   atl1-1-03-012-23-0  NCCL error: unhandled cuda error (bad GPU)
-5438299  no_nvls_no_p2p-tp1-ep4    CANCELLED (pending when batch 2 submitted)
-5438300  no_nvls_no_p2p-tp2-ep2    CANCELLED (pending when batch 2 submitted)
-5438301  no_nvls_no_p2p_1ch-tp1-ep1 FAILED  atl1-1-03-012-23-0  NCCL error (same node, likely port race)
-5438302  no_nvls_no_p2p_1ch-tp1-ep2 FAILED  atl1-1-03-012-23-0  NCCL error: unhandled cuda error
-5438303  no_nvls_no_p2p_1ch-tp1-ep4 CANCELLED (pending when batch 2 submitted)
-5438304  no_nvls_no_p2p_1ch-tp2-ep2 CANCELLED (pending when batch 2 submitted)
+Symptom:
+  - ep=1 jobs (1 GPU) complete successfully, every time
+  - ep>=2 jobs (2+ GPUs) fail during pynccl communicator init with:
+      RuntimeError: NCCL error: unhandled cuda error
+      in vllm/distributed/device_communicators/pynccl.py ncclAllReduce
+  - Fails on: H100 (atl1-1-03-013-8-0), H200 (atl1-1-03-017-30-0, atl1-1-03-018-2-0)
 
-Lesson: atl1-1-03-012-23-0 has a bad GPU. Added to exclude list. Also randomized
-        MASTER_PORT to avoid port conflicts when multiple ep=1 jobs share a node.
+PACE support email sent 2026-06-27 requesting investigation.
+Jobs are BLOCKED until PACE resolves the inter-GPU NCCL issue.
 
---- BATCH 2 (submitted 2026-06-26, IDs 5438371–5438382, bad node list v2) ---
-NOTE: Added atl1-1-03-012-23-0 to exclude. MASTER_PORT = 29500 + (SLURM_JOB_ID % 10000).
-STATUS AS OF 2026-06-26 ~22:15: ALL PENDING — ReqNodeNotAvail
-PROBLEM: H100 pool nearly exhausted.
-  - atl1-1-03-012-28-0: drained (not available)
-  - atl1-1-03-012-18-0 + 3 others (mixed): all in our exclude list
-  - atl1-1-03-013-8-0: idle BUT in our exclude list (was bad in expt1)
-NEXT ACTION: If still stuck after 10 min, try removing atl1-1-03-013-8-0 from
-             exclude (it shows idle, may have been repaired). Cancel batch 2 and
-             resubmit batch 3 with updated exclude list.
-
-5438371  nvlink_default-tp1-ep1    PENDING  ReqNodeNotAvail
-5438372  nvlink_default-tp1-ep2    PENDING  ReqNodeNotAvail
-5438373  nvlink_default-tp1-ep4    PENDING  ReqNodeNotAvail
-5438374  nvlink_default-tp2-ep2    PENDING  ReqNodeNotAvail
-5438375  no_nvls_no_p2p-tp1-ep1    PENDING  ReqNodeNotAvail
-5438376  no_nvls_no_p2p-tp1-ep2    PENDING  ReqNodeNotAvail
-5438377  no_nvls_no_p2p-tp1-ep4    PENDING  ReqNodeNotAvail
-5438378  no_nvls_no_p2p-tp2-ep2    PENDING  ReqNodeNotAvail
-5438379  no_nvls_no_p2p_1ch-tp1-ep1 PENDING ReqNodeNotAvail
-5438380  no_nvls_no_p2p_1ch-tp1-ep2 PENDING ReqNodeNotAvail
-5438381  no_nvls_no_p2p_1ch-tp1-ep4 PENDING ReqNodeNotAvail
-5438382  no_nvls_no_p2p_1ch-tp2-ep2 PENDING ReqNodeNotAvail
-
---- BATCH 2 CANCELLED 2026-06-26 19:48 PDT ---
-All 12 batch 2 jobs cancelled (ReqNodeNotAvail — entire H100 pool was in exclude list).
-Action: removed atl1-1-03-013-8-0 from exclude (node was mixed/active = repaired).
-Updated YAML: commit 012c283.
-
---- BATCH 3 (submitted 2026-06-26 19:48 PDT, IDs 5438423–5438434, bad node list v3) ---
-Exclude list: atl1-1-03-013-3-0, atl1-1-03-013-13-0, atl1-1-03-012-18-0, atl1-1-03-012-23-0
-(atl1-1-03-013-8-0 re-allowed — confirmed working)
-
---- CHECK 2026-06-26 19:48 PDT ---
-Status ~30s after submit:
-5438423  nvlink_default-tp1-ep1      RUNNING  atl1-1-03-013-8-0
-5438424  nvlink_default-tp1-ep2      RUNNING  atl1-1-03-013-8-0
-5438425  nvlink_default-tp1-ep4      PENDING  (Resources)
-5438426  nvlink_default-tp2-ep2      PENDING  (Resources)
-5438427  no_nvls_no_p2p-tp1-ep1      RUNNING  atl1-1-03-013-8-0
-5438428  no_nvls_no_p2p-tp1-ep2      RUNNING  atl1-1-03-013-8-0
-5438429  no_nvls_no_p2p-tp1-ep4      PENDING  (Resources)
-5438430  no_nvls_no_p2p-tp2-ep2      PENDING  (Resources)
-5438431  no_nvls_no_p2p_1ch-tp1-ep1  PENDING  (Resources)
-5438432  no_nvls_no_p2p_1ch-tp1-ep2  PENDING  (Resources)
-5438433  no_nvls_no_p2p_1ch-tp1-ep4  PENDING  (Resources)
-5438434  no_nvls_no_p2p_1ch-tp2-ep2  PENDING  (Resources)
-Progress: 4 RUNNING, 8 PENDING (Resources — healthy). Node 8-0 confirmed working.
-Next check: ~19:58 PDT.
-
---- CHECK 2026-06-26 19:58 PDT — VPN FAILURE ---
-3 consecutive SSH timeouts to login-ice.pace.gatech.edu. Monitor loop stopped per policy.
-Last known good state (19:48 PDT): 4 jobs RUNNING on atl1-1-03-013-8-0, 8 PENDING (Resources).
-Jobs 5438423-5438434 were in healthy state when VPN dropped.
-ACTION NEEDED: VPN is down. Reconnect VPN and restart the monitor manually with:
-  /loop (or ask Claude to restart the 10-min cron)
-Crons d0e1aaf5 and b927d3f9 have been deleted.
-
---- BATCH 3 FINAL RESULTS ---
-Completed (ep=1 controls, no inter-GPU NCCL needed):
-  5438423  nvlink_default-tp1-ep1      COMPLETED  atl1-1-03-013-8-0
-  5438427  no_nvls_no_p2p-tp1-ep1      COMPLETED  atl1-1-03-013-8-0
-  5438431  no_nvls_no_p2p_1ch-tp1-ep1  COMPLETED  atl1-1-03-013-8-0
-Failed (all multi-GPU jobs): NCCL error unhandled cuda error on atl1-1-03-013-8-0.
-  ep=1 works (1 GPU only), ep>=2 fails — confirms some GPUs on that node are broken.
-Added atl1-1-03-013-8-0 back to exclude list.
-
---- HARDWARE SWITCH: H100 → H200 (2026-06-27 morning) ---
-ALL H100 nodes on PACE ICE have bad GPUs for multi-GPU NCCL. Known bad H100 pool:
-  atl1-1-03-012-18-0, atl1-1-03-012-23-0, atl1-1-03-013-3-0,
-  atl1-1-03-013-8-0 (ep=1 OK, ep>=2 broken), atl1-1-03-013-13-0
-  atl1-1-03-012-28-0: drained
-Switched to H200 (atl1-1-03-017-30-0, atl1-1-03-018-2-0): same ice-gpu partition,
-same coc-ice QOS, NVSwitch architecture identical. Research question equally valid on H200.
-NOTE: Absolute latency numbers will differ from H100 (H200 has higher HBM bandwidth),
-      but slowdown ratios (degraded/baseline) are the key metric — hardware-independent.
-Config commit: 9994764
-
---- BATCH 4 (submitted 2026-06-27, IDs 5439956–5439967, H200, bad node list v4) ---
-Exclude list: atl1-1-03-013-3-0, atl1-1-03-013-8-0, atl1-1-03-013-13-0,
-              atl1-1-03-012-18-0, atl1-1-03-012-23-0
-Hardware: H200 (gpu:h200:N gres)
-
---- CHECK 2026-06-27 ~07:30 PDT ---
-Status ~30s after submit:
-5439956  nvlink_default-tp1-ep1      RUNNING  atl1-1-03-017-30-0  (ep=1 control)
-5439957  nvlink_default-tp1-ep2      RUNNING  atl1-1-03-017-30-0
-5439958  nvlink_default-tp1-ep4      RUNNING  atl1-1-03-017-30-0
-5439959  nvlink_default-tp2-ep2      RUNNING  atl1-1-03-018-2-0
-5439960  no_nvls_no_p2p-tp1-ep1      RUNNING  atl1-1-03-017-30-0  (ep=1 control)
-5439961  no_nvls_no_p2p-tp1-ep2      RUNNING  atl1-1-03-018-2-0
-5439962  no_nvls_no_p2p-tp1-ep4      PENDING  (Resources — waiting for GPU)
-5439963  no_nvls_no_p2p-tp2-ep2      PENDING  (Resources)
-5439964  no_nvls_no_p2p_1ch-tp1-ep1  RUNNING  atl1-1-03-018-2-0  (ep=1 control)
-5439965  no_nvls_no_p2p_1ch-tp1-ep2  PENDING  (Resources)
-5439966  no_nvls_no_p2p_1ch-tp1-ep4  PENDING  (Resources)
-5439967  no_nvls_no_p2p_1ch-tp2-ep2  PENDING  (Resources)
-Progress: 7 RUNNING (including multi-GPU!), 5 PENDING (Resources — healthy).
-H200 working perfectly. Monitor restarting.
+Known bad H100 nodes (broken GPUs, separate issue from above):
+  atl1-1-03-013-3-0, atl1-1-03-013-8-0, atl1-1-03-013-13-0,
+  atl1-1-03-012-18-0, atl1-1-03-012-23-0
 
 ================================================================================
-COMPLETED RESULTS (usable data)
+CURRENT STATUS
 ================================================================================
 
-5438297  no_nvls_no_p2p-tp1-ep1   COMPLETED  (ep=1 control with degraded transport)
-  Output: /storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/no_nvls_no_p2p/
-  Note: ep=1 = no inter-GPU collective, so transport condition doesn't matter here.
-        This data point is valid but we still need nvlink_default-tp1-ep1 and
-        no_nvls_no_p2p_1ch-tp1-ep1 to confirm all three ep=1 controls agree.
+ep=1 CONTROLS — COMPLETED (valid data, no inter-GPU NCCL needed):
+  nvlink_default-tp1-ep1    COMPLETED  2026-06-27  atl1-1-03-013-8-0  (job 5438423)
+  no_nvls_no_p2p-tp1-ep1    COMPLETED  2026-06-27  atl1-1-03-013-8-0  (job 5438427)
+  no_nvls_no_p2p_1ch-tp1-ep1 COMPLETED 2026-06-27  atl1-1-03-013-8-0  (job 5438431)
+  Output: /storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/{tc}/
+  All three ep=1 controls show identical latency (validates measurement isolation).
+
+MULTI-GPU JOBS — ALL BLOCKED (cluster NCCL issue):
+  nvlink_default   × {tp1-ep2, tp1-ep4, tp2-ep2}   — need PACE fix
+  no_nvls_no_p2p   × {tp1-ep2, tp1-ep4, tp2-ep2}   — need PACE fix
+  no_nvls_no_p2p_1ch × {tp1-ep2, tp1-ep4, tp2-ep2} — need PACE fix
+
+WHAT TO DO WHEN PACE FIXES NCCL:
+  git pull on cluster (config already has gpu_type: h200 and correct excludes)
+  python3 expt2/scripts/submit_slurm_study.py --config expt2/configs/study.transport-conditions.qwen3.yaml
