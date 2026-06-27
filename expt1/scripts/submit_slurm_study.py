@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from fused_moe_kernel_study.config import load_study_config
+from fused_moe_kernel_study.config import load_study_config, TRANSPORT_CONDITION_ENV
 
 
 def _add_if(cmd: list[str], flag: str, value: str | None) -> None:
@@ -32,18 +32,18 @@ def _normalize_path_for_export(value: str | None, default: str | None = None) ->
     return str(Path(os.path.expandvars(raw)).resolve())
 
 
-def build_sbatch_command(config_path: Path, tp: int, ep: int, dry_run: bool = False) -> list[str]:
+def build_sbatch_command(config_path: Path, tp: int, ep: int, tc: str = "nvlink_default", dry_run: bool = False) -> list[str]:
     cfg = load_study_config(config_path)
     slurm = cfg.slurm
     world_size = tp * ep
     nodes = max(slurm.min_nodes, math.ceil(world_size / slurm.gpus_per_node))
-    out_dir = Path(cfg.output_root).expanduser() / cfg.study_name / f"tp{tp}-ep{ep}"
+    out_dir = Path(cfg.output_root).expanduser() / cfg.study_name / tc / f"tp{tp}-ep{ep}"
     logs_dir = Path(cfg.output_root).expanduser() / cfg.study_name / "slurm-logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         "sbatch",
-        f"--job-name={cfg.study_name}-tp{tp}-ep{ep}",
+        f"--job-name={cfg.study_name}-{tc}-tp{tp}-ep{ep}",
         f"--nodes={nodes}",
         f"--ntasks={world_size}",
         f"--cpus-per-task={slurm.cpus_per_task}",
@@ -91,6 +91,9 @@ def build_sbatch_command(config_path: Path, tp: int, ep: int, dry_run: bool = Fa
         export_bits["UV_ENV_DIR"] = uv_env_dir
     if deepep_wheel:
         export_bits["DEEPEP_WHEEL"] = deepep_wheel
+    tc_env = TRANSPORT_CONDITION_ENV.get(tc, {})
+    export_bits["TRANSPORT_CONDITION"] = tc
+    export_bits.update(tc_env)
     export_arg = ",".join([k if v is None else f"{k}={v}" for k, v in export_bits.items()])
     cmd.append(f"--export={export_arg}")
     cmd.append(str((ROOT / "slurm" / slurm.sbatch_script).resolve()))
@@ -104,11 +107,12 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     cfg = load_study_config(args.config)
-    for point in cfg.parallel_points:
-        cmd = build_sbatch_command(Path(args.config), point.tp, point.ep, dry_run=args.dry_run)
-        print("[submit]", " ".join(cmd))
-        if not args.dry_run:
-            subprocess.run(cmd, check=True)
+    for tc in cfg.transport_conditions:
+        for point in cfg.parallel_points:
+            cmd = build_sbatch_command(Path(args.config), point.tp, point.ep, tc=tc, dry_run=args.dry_run)
+            print("[submit]", " ".join(cmd))
+            if not args.dry_run:
+                subprocess.run(cmd, check=True)
     return 0
 
 

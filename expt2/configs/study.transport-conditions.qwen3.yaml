@@ -1,0 +1,94 @@
+# expt2: Transport condition degradation study
+#
+# Research question: how much does fused-MoE latency depend on GPU P2P
+# communication bandwidth vs. local compute/memory bandwidth?
+#
+# Three NCCL transport conditions (separate SLURM jobs per condition):
+#   nvlink_default    - NVLink/NVSwitch at full bandwidth (baseline, ~900 GB/s)
+#   no_nvls_no_p2p    - NCCL_NVLS_ENABLE=0 NCCL_P2P_DISABLE=1 (PCIe fallback)
+#   no_nvls_no_p2p_1ch - above + NCCL_MAX_NCHANNELS=1 (single-channel PCIe)
+#
+# CRITICAL NOTE: NCCL_P2P_DISABLE alone may NOT disable NVSwitch on H100 nodes.
+# NCCL_NVLS_ENABLE=0 is required to disable the NVLink SHARP path. Verify with
+# NCCL_DEBUG=INFO that the intended transport path is selected before trusting
+# results from the degraded-transport conditions.
+#
+# Shape: Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
+# Hardware: PACE ICE H100, 4 GPUs/node, NVSwitch intra-node
+# ep=1 parallel point is a control (no inter-GPU collective; all conditions identical)
+#
+# Total benchmark conditions: 1 shape x 11 token counts x 3 transport x 4 parallel = 132
+# Total SLURM jobs submitted: 3 transport x 4 parallel = 12
+
+study_name: transport-conditions-qwen3
+all2all_backend: allgather_reducescatter
+output_root: ~/scratch/moe-breakdown-runs/expt2
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 42
+warmup_iters: 30
+measure_iters: 100
+collect_buckets: true
+bucket_profile_iters: 5
+bucket_full_events: true
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 512
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: qwen3_30b_a3b_moe
+    hidden_size: 2048
+    intermediate_size: 768
+    num_experts: 128
+    topk: 8
+    dtype: bfloat16
+
+# Routing fixed to uniform for isolation — routing skew is a separate study dimension.
+routing_modes:
+  - uniform
+
+# Decode-like regime: [1, 2, 4, 8, 16, 32, 64]
+# Prefill-like regime: [128, 512, 2048, 8192]
+tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192]
+
+# 4 parallel points. ep=1 is the no-communication control — all transport conditions
+# must produce identical latency here (validates measurement setup). ep>=2 exercises
+# inter-GPU allgather/reducescatter.
+parallel_points:
+  - {tp: 1, ep: 1}   # control: no inter-GPU collective
+  - {tp: 1, ep: 2}   # onset of transport sensitivity
+  - {tp: 1, ep: 4}   # maximum EP on 4-GPU node
+  - {tp: 2, ep: 2}   # TP+EP: both TP allreduce and EP allgather active
+
+# Transport conditions: submit script generates one SLURM job per (tc x parallel_point).
+# Env var mapping is in TRANSPORT_CONDITION_ENV in config.py.
+transport_conditions:
+  - nvlink_default
+  - no_nvls_no_p2p
+  - no_nvls_no_p2p_1ch
+
+alphas: [1.0]
+
+slurm:
+  partition: ice-gpu
+  qos: coc-ice
+  time: 02:00:00
+  cpus_per_task: 8
+  gpus_per_node: 4
+  gpu_type: h100
+  use_gres: true
+  mem: 64G
+  modules: [gcc/12.3.0, python/3.11, cuda/12.1.1]
+  workdir: /home/hice1/sghose7/moe-breakdown
+  uv_env_dir: ~/scratch/moe-breakdown-venv
+  extra_sbatch_args:
+    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0"

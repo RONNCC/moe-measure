@@ -49,7 +49,7 @@ else
 fi
 
 if [[ -n "$UV_ENV_DIR" ]]; then
-  bash "$ROOT_DIR/scripts/bootstrap_uv_env.sh" "$UV_ENV_DIR"
+  bash "$ROOT_DIR/expt1/scripts/bootstrap_uv_env.sh" "$UV_ENV_DIR"
   VENV="$UV_ENV_DIR"
 fi
 
@@ -80,6 +80,10 @@ echo "[slurm] WORKDIR=$WORKDIR"
 echo "[slurm] STUDY_CONFIG=$STUDY_CONFIG"
 echo "[slurm] TP_SIZE=$TP_SIZE EP_SIZE=$EP_SIZE WORLD_SIZE=$WORLD_SIZE"
 echo "[slurm] OUT_DIR=$OUT_DIR"
+echo "[slurm] TRANSPORT_CONDITION=${TRANSPORT_CONDITION:-nvlink_default}"
+echo "[slurm] NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-unset}"
+echo "[slurm] NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-unset}"
+echo "[slurm] NCCL_MAX_NCHANNELS=${NCCL_MAX_NCHANNELS:-unset}"
 
 ARGS=(
   --config "$STUDY_CONFIG"
@@ -94,4 +98,4 @@ srun \
   --ntasks="$WORLD_SIZE" \
   --gpus-per-task=1 \
   --cpus-per-task="$CPUS_PER_TASK" \
-  python3 "$ROOT_DIR/scripts/run_direct_moe_sweep.py" "${ARGS[@]}"
+  python3 "$ROOT_DIR/expt1/scripts/run_direct_moe_sweep.py" "${ARGS[@]}"

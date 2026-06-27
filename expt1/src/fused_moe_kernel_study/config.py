@@ -76,6 +76,7 @@ class StudyConfig:
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
     baseline: dict[str, Any] = field(default_factory=dict)
     routing_modes: list[str] = field(default_factory=list)  # empty = use alpha sweep (backward compat)
+    transport_conditions: list[str] = field(default_factory=lambda: ["nvlink_default"])
 
     def max_tokens(self) -> int:
         return max(self.tokens)
@@ -105,6 +106,7 @@ class BenchmarkCondition:
     alpha: float
     mode: str
     routing_mode: str = "alpha"
+    transport_condition: str = "nvlink_default"
 
     def as_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -114,6 +116,19 @@ class BenchmarkCondition:
 
 
 VALID_SWEEP_MODES = {"one_at_a_time", "full_factorial"}
+
+TRANSPORT_CONDITION_ENV: dict[str, dict[str, str]] = {
+    "nvlink_default": {},
+    "no_nvls_no_p2p": {
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_P2P_DISABLE": "1",
+    },
+    "no_nvls_no_p2p_1ch": {
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_P2P_DISABLE": "1",
+        "NCCL_MAX_NCHANNELS": "1",
+    },
+}
 
 
 def _require_keys(data: dict[str, Any], keys: list[str]) -> None:
@@ -157,6 +172,7 @@ def load_study_config(path: str | Path) -> StudyConfig:
         slurm=slurm,
         baseline=dict(raw.get("baseline") or {}),
         routing_modes=routing_modes,
+        transport_conditions=list(raw.get("transport_conditions") or ["nvlink_default"]),
     )
     invalid_modes = [m for m in cfg.sweep_modes if m not in VALID_SWEEP_MODES]
     if invalid_modes:
@@ -205,8 +221,8 @@ def make_conditions(cfg: StudyConfig, parallel: ParallelPoint) -> list[Benchmark
                     for tokens in cfg.tokens:
                         conditions.append(BenchmarkCondition(shape=shape, parallel=parallel, tokens=tokens, alpha=alpha, mode="full_factorial"))
 
-    dedup: dict[tuple[str, int, float, str, int, int, str], BenchmarkCondition] = {}
+    dedup: dict[tuple[str, int, float, str, int, int, str, str], BenchmarkCondition] = {}
     for cond in conditions:
-        key = (cond.shape.name, cond.tokens, cond.alpha, cond.routing_mode, cond.parallel.tp, cond.parallel.ep, cond.mode)
+        key = (cond.shape.name, cond.tokens, cond.alpha, cond.routing_mode, cond.parallel.tp, cond.parallel.ep, cond.mode, cond.transport_condition)
         dedup[key] = cond
     return list(dedup.values())
