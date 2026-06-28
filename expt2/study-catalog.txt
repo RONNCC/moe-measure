@@ -27,71 +27,53 @@ Parallel points:
 
 Total: 3 transport × 4 parallel points = 12 SLURM jobs, 132 benchmark conditions
 
-Hardware target: PACE ICE H200 SXM5 (atl1-1-03-017-30-0)
-  Note: H100 nodes all have bad GPUs (see KNOWN ISSUES below). H200 has same
-  NVSwitch architecture so results are equivalent for this study.
+Hardware: PACE ICE H200 SXM5
+  Jobs ran across nodes: atl1-1-03-017-16-0, atl1-1-03-017-30-0, atl1-1-03-018-2-0
 
 Config: expt2/configs/study.transport-conditions.qwen3.yaml
 Cluster output: /storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/
 SLURM logs: ~/scratch/moe-breakdown-runs/expt2/transport-conditions-qwen3/slurm-logs/
 
 ================================================================================
-ROOT CAUSE: NCCL CUMEM + SLURM --gpus-per-task INCOMPATIBILITY (RESOLVED)
+ENGINEERING NOTES
 ================================================================================
 
-Problem diagnosed 2026-06-27 via NCCL_DEBUG=INFO on H200 (atl1-1-03-017-30-0).
+NCCL P2P / SLURM --gpus-per-task incompatibility (resolved 2026-06-27):
+  NCCL 2.30 selects P2P/CUMEM (or P2P/IPC) for intra-node transfers.
+  Both require peer GPUs in CUDA_VISIBLE_DEVICES. SLURM --gpus-per-task=1
+  restricts each rank to CUDA_VISIBLE_DEVICES=0 only, so peer import fails
+  with "invalid device ordinal" / "invalid argument" → "unhandled cuda error".
+  Fix: removed --gpus-per-task=1 from srun. All job-allocated GPUs stay visible;
+  each rank calls torch.cuda.set_device(local_rank) in distributed.py.
+  Confirmed working: P2P/IPC channels established, both ranks return OK.
 
-Root cause:
-  NCCL 2.21+ defaults to P2P/CUMEM (CUDA Unified Memory) for intra-node P2P.
-  SLURM --gpus-per-task=1 sets CUDA_VISIBLE_DEVICES=0 per rank, hiding peer GPUs.
-  When NCCL calls ncclP2pImportShareableBuffer it fails with:
-    Cuda failure 101 'invalid device ordinal'
-  because the peer GPU's physical busId (e.g. 0x5d000) is not visible in the
-  process's CUDA device list. This cascades to "NCCL error: unhandled cuda error"
-  in PyNcclCommunicator.all_reduce() during vllm's warmup call.
-
-Confirmation: torch.distributed NCCL allReduce succeeded on the same nodes because
-  those test runs did NOT use --gpus-per-task=1 (all GPUs visible to all ranks).
-
-This is NOT a cluster hardware issue. NVLink topology is intact (NV18 confirmed).
-This is a NCCL 2.30 / SLURM gpu-per-task isolation incompatibility.
-
-Fix applied in expt2/slurm/run_direct_moe_sweep.sbatch:
-  export NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
-  Forces legacy IPC P2P transport instead of CUMEM. Peer GPUs do not need to be
-  in CUDA_VISIBLE_DEVICES for IPC handles.
-
-NCCL debug findings (for reference):
-  - MNNVL fabric UUID 0.0 cliqueId 0x0 state 3 healthMask 0x0 (fabricmanager not
-    driving MNNVL, but irrelevant — P2P/CUMEM is intra-node, not NVLink SHARP)
-  - P2P/CUMEM selected for all 24 channels before CUMEM import fails
-  - Both H100 and H200 nodes affected (same NCCL version, same SLURM config)
+Custom allreduce patch:
+  vllm's CustomAllreduce calls can_device_access_peer(rank, world_size) using
+  global rank as device ID, which breaks when only device 0 is visible. Patched
+  to always return False in distributed.py (forces NCCL allreduce instead).
 
 ================================================================================
-KNOWN ISSUES
+CURRENT STATUS — COMPLETE
 ================================================================================
 
-Known bad H100 nodes (broken GPUs, separate issue):
-  atl1-1-03-013-3-0, atl1-1-03-013-8-0, atl1-1-03-013-13-0,
-  atl1-1-03-012-18-0, atl1-1-03-012-23-0
-  → These are excluded in the study config. Using H200 only.
+ALL 12 JOBS COMPLETED  2026-06-27  H200 nodes (atl1-1-03-017-{16,30}-0, atl1-1-03-018-2-0)
+  Jobs: 5440143–5440154
 
-================================================================================
-CURRENT STATUS
-================================================================================
+  nvlink_default   × tp1-ep1  DONE  11 rows  job 5440143
+  nvlink_default   × tp1-ep2  DONE  11 rows  job 5440144
+  nvlink_default   × tp1-ep4  DONE  11 rows  job 5440145
+  nvlink_default   × tp2-ep2  DONE  11 rows  job 5440146
+  no_nvls_no_p2p   × tp1-ep1  DONE  11 rows  job 5440147
+  no_nvls_no_p2p   × tp1-ep2  DONE  11 rows  job 5440148
+  no_nvls_no_p2p   × tp1-ep4  DONE  11 rows  job 5440149
+  no_nvls_no_p2p   × tp2-ep2  DONE  11 rows  job 5440150
+  no_nvls_no_p2p_1ch × tp1-ep1 DONE 11 rows  job 5440151
+  no_nvls_no_p2p_1ch × tp1-ep2 DONE 11 rows  job 5440152
+  no_nvls_no_p2p_1ch × tp1-ep4 DONE 11 rows  job 5440153
+  no_nvls_no_p2p_1ch × tp2-ep2 DONE 11 rows  job 5440154
 
-ep=1 CONTROLS — COMPLETED (valid data, no inter-GPU NCCL needed):
-  nvlink_default-tp1-ep1     COMPLETED  2026-06-27  atl1-1-03-013-8-0  (job 5438423)
-  no_nvls_no_p2p-tp1-ep1     COMPLETED  2026-06-27  atl1-1-03-013-8-0  (job 5438427)
-  no_nvls_no_p2p_1ch-tp1-ep1 COMPLETED  2026-06-27  atl1-1-03-013-8-0  (job 5438431)
-  Output: /storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/{tc}/
-  All three ep=1 controls show identical latency (validates measurement isolation).
+  132/132 benchmark conditions complete.
 
-MULTI-GPU JOBS — READY TO RESUBMIT (fix applied):
-  Fix: NCCL_CUMEM_ENABLE=0 added to expt2/slurm/run_direct_moe_sweep.sbatch
-  Target: H200 nodes (atl1-1-03-017-30-0 confirmed idle)
+Output: /storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/{tc}/544*_tp{T}-ep{E}/results.csv
 
-WHAT TO DO NEXT:
-  git pull on cluster (NCCL_CUMEM_ENABLE=0 fix is in the sbatch)
-  python3 expt2/scripts/submit_slurm_study.py --config expt2/configs/study.transport-conditions.qwen3.yaml
-  (The ep=1 jobs will rerun but are fast; all 12 jobs will be submitted)
+NEXT STEP: analysis. Download results and run notebooks.
