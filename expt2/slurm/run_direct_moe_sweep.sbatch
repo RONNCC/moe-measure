@@ -68,11 +68,6 @@ fi
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPUS_PER_TASK}"
 export MASTER_PORT="${MASTER_PORT:-$((29500 + SLURM_JOB_ID % 10000))}"
-# NCCL 2.21+ defaults to P2P/CUMEM which requires peer GPUs to be in CUDA_VISIBLE_DEVICES.
-# SLURM --gpus-per-task=1 sets CUDA_VISIBLE_DEVICES=0 per rank, hiding peer GPUs.
-# CUMEM import then fails with "invalid device ordinal" (CUDA error 101).
-# Forcing legacy IPC P2P fixes this.
-export NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
 
 if [[ -z "${MASTER_ADDR:-}" && -n "${SLURM_NODELIST:-}" ]]; then
   export MASTER_ADDR
@@ -97,8 +92,10 @@ if [[ -n "$OUT_DIR" ]]; then
   ARGS+=(--out-dir "$OUT_DIR")
 fi
 
+# All GPUs from the job allocation remain visible to all tasks (no --gpus-per-task).
+# Each rank selects its device via torch.cuda.set_device(local_rank) in distributed.py.
+# --gpus-per-task=1 would hide peer GPUs from CUDA_VISIBLE_DEVICES, breaking NCCL P2P.
 srun \
   --ntasks="$WORLD_SIZE" \
-  --gpus-per-task=1 \
   --cpus-per-task="$CPUS_PER_TASK" \
   python3 "$ROOT_DIR/expt2/scripts/run_direct_moe_sweep.py" "${ARGS[@]}"
