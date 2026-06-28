@@ -1,0 +1,104 @@
+# expt2.5: Routing Imbalance × Transport Sweep
+#
+# Research question: does routing skew interact with transport condition?
+# Skew changes per-rank dispatch volume and adds straggler synchronization —
+# it may amplify interconnect sensitivity or shift the token-count "knee."
+#
+# Design:
+#   - Two transport extremes: NVLink baseline vs. full PCIe degradation.
+#     (Re-running both conditions here rather than referencing expt2 allows
+#      direct comparison in the same CSV with the extended token range.)
+#   - Six routing modes covering the full spectrum from uniform to worst-case.
+#   - Full extended token range including 16k/32k/65k for turnover detection.
+#
+# Routing modes:
+#   uniform    : round-robin, each expert gets ⌊N·k/E⌋ or ⌈N·k/E⌉ tokens  (α≈1.0)
+#   zipfian    : P(expert k) ∝ 1/k (Zipf s=1.0) — realistic MoE proxy      (α≈2–6×)
+#   random     : single Dirichlet(1.0) draw — mild natural imbalance         (α≈1–3×)
+#   skewed-2x  : one hot expert receives 2× average load                     (α=2.0)
+#   skewed-4x  : one hot expert receives 4× average load                     (α=4.0)
+#   worst-case : all topk slots assigned to topk experts; rest receive 0     (α=E/k)
+#
+# Transport conditions (2 extremes from expt2.5 transport-extended study):
+#   nvlink_default : NVLink/NVSwitch at full bandwidth (baseline)
+#   no_nvls_no_p2p : NCCL_NVLS_ENABLE=0 + NCCL_P2P_DISABLE=1 (PCIe fallback)
+#
+# Shape: Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
+# Hardware: PACE ICE H200 SXM5, single-node, 4 GPUs/node
+# Parallel: tp1-ep1 (control), tp1-ep2, tp1-ep4, tp2-ep2
+# Tokens: 14 values from 1 to 65536
+#
+# Total SLURM jobs: 2 transport × 4 parallel = 8
+# Conditions per job: 6 routing × 14 tokens = 84
+# Grand total: 8 × 84 = 672 benchmark conditions
+
+study_name: routing-sweep-qwen3
+all2all_backend: allgather_reducescatter
+output_root: ~/scratch/moe-breakdown-runs/expt2.5
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 42
+warmup_iters: 30
+measure_iters: 100
+collect_buckets: true
+bucket_profile_iters: 5
+bucket_full_events: true
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 512
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: qwen3_30b_a3b_moe
+    hidden_size: 2048
+    intermediate_size: 768
+    num_experts: 128
+    topk: 8
+    dtype: bfloat16
+
+# All six routing modes.
+# For worst-case with E=128 topk=8: all tokens go to 8 experts → α = 128/8 = 16.
+routing_modes:
+  - uniform
+  - zipfian
+  - random
+  - skewed-2x
+  - skewed-4x
+  - worst-case
+
+tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+
+parallel_points:
+  - {tp: 1, ep: 1}   # control: no inter-GPU collective
+  - {tp: 1, ep: 2}   # onset of transport sensitivity
+  - {tp: 1, ep: 4}   # maximum EP on 4-GPU node
+  - {tp: 2, ep: 2}   # TP+EP: both TP allreduce and EP allgather active
+
+transport_conditions:
+  - nvlink_default
+  - no_nvls_no_p2p
+
+alphas: [1.0]
+
+slurm:
+  partition: ice-gpu
+  qos: coc-ice
+  time: 04:00:00
+  cpus_per_task: 8
+  gpus_per_node: 4
+  gpu_type: h200
+  use_gres: true
+  mem: 64G
+  modules: [gcc/12.3.0, python/3.11, cuda/12.1.1]
+  workdir: /home/hice1/sghose7/moe-breakdown
+  uv_env_dir: ~/scratch/moe-breakdown-venv
+  extra_sbatch_args:
+    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"

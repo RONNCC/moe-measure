@@ -49,10 +49,37 @@
 
 **Key question:** Does the slowdown ratio peak in the moderate-token regime (where allgather volume is significant but GEMM hasn't gone compute-bound) and return to ~1.0 at large tokens?
 
-**Results:** `expt2/all_runs.zip` (after jobs complete)
+**Results:** `expt2/all_runs.zip` — 12 CSVs, jobs 5440143–5440154 (132 benchmark conditions)
 
-**Code:** `expt1/src/fused_moe_kernel_study/` (shared library; `transport_condition` field added)
+**Code:** `expt2/src/fused_moe_kernel_study/`
 
 **Configs:** `expt2/configs/study.transport-conditions.qwen3.yaml`
 
-**Cluster storage:** `/storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/`
+**Cluster storage:** `/storage/ice1/0/2/sghose7/moe-breakdown-runs/expt2/transport-conditions-qwen3/`
+
+---
+
+## expt2.5 — Extended Transport & Routing Study
+
+**Goal:** Extends expt2 along three axes: (1) wider token sweep to 65k to find the compute-bound turnover; (2) NVLS×P2P ablation (4-cell factorial) to isolate which NCCL knob costs what; (3) bandwidth dose-response via NCCL_MAX_NCHANNELS 1→8; (4) routing-imbalance × transport interaction with 6 named routing modes.
+
+**Hardware:** PACE ICE H200 SXM5, single-node, 4 GPUs/node
+
+**Shape:** Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
+
+**Study A — transport-extended (32 jobs, 448 conditions):**
+- 8 transport conditions: nvlink_default, nvls_off, p2p_off, no_nvls_no_p2p, no_nvls_no_p2p_{8,4,2,1}ch
+- Uniform routing; tokens 1–65536 (14 values)
+
+**Study B — routing-sweep (8 jobs, 672 conditions):**
+- 2 transport extremes: nvlink_default, no_nvls_no_p2p
+- 6 routing modes: uniform, zipfian, random, skewed-2x, skewed-4x, worst-case
+- Tokens 1–65536 (14 values)
+
+**Total: 40 jobs, 1120 benchmark conditions**
+
+**Code:** `expt2.5/src/fused_moe_kernel_study/`
+
+**Configs:** `expt2.5/configs/`
+
+**Cluster storage:** `~/scratch/moe-breakdown-runs/expt2.5/` (not yet submitted)

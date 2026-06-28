@@ -1,0 +1,115 @@
+# expt2.5: Extended Transport Condition Study
+#
+# Extends expt2 along three axes:
+#
+#   1. Wider token sweep   — adds 16k/32k/65k to find the compute-bound turnover
+#                            and connect to Expt 1's 65k data points.
+#
+#   2. NVLS × P2P ablation — breaks the compound "no_nvls_no_p2p" condition into
+#                            a 4-cell factorial ({NVLS on/off} × {P2P on/off}).
+#                            Attributes slowdown to NVLink-SHARP loss vs. P2P-IPC
+#                            loss independently.
+#
+#   3. Bandwidth rungs     — holds transport=PCIe (NVLS=0, P2P=0) and varies
+#                            NCCL_MAX_NCHANNELS from 1→8. A latency-vs-1/BW
+#                            linear relationship proves bandwidth-bound; deviation
+#                            indicates launch/sync overhead.
+#
+# Routing is pinned to uniform here to isolate transport effects.
+# See study.routing-sweep.qwen3.yaml for the routing-imbalance × transport study.
+#
+# Transport conditions (8 total):
+#   nvlink_default       : NVLink/NVSwitch baseline (NVLS on, P2P on)
+#   nvls_off             : NCCL_NVLS_ENABLE=0 only (NVLink-SHARP off, P2P-IPC on)
+#   p2p_off              : NCCL_P2P_DISABLE=1 only (P2P-IPC off, NVLink-SHARP on)
+#   no_nvls_no_p2p       : NCCL_NVLS_ENABLE=0 + NCCL_P2P_DISABLE=1 (PCIe, all channels)
+#   no_nvls_no_p2p_8ch   : PCIe + NCCL_MAX_NCHANNELS=8
+#   no_nvls_no_p2p_4ch   : PCIe + NCCL_MAX_NCHANNELS=4
+#   no_nvls_no_p2p_2ch   : PCIe + NCCL_MAX_NCHANNELS=2
+#   no_nvls_no_p2p_1ch   : PCIe + NCCL_MAX_NCHANNELS=1
+#
+# Shape: Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
+# Hardware: PACE ICE H200 SXM5, single-node, 4 GPUs/node
+# Parallel: tp1-ep1 (control), tp1-ep2, tp1-ep4, tp2-ep2
+# Tokens: 14 values from 1 to 65536
+#
+# Total SLURM jobs: 8 transport × 4 parallel = 32
+# Conditions per job: 1 routing × 14 tokens = 14
+# Grand total: 32 × 14 = 448 benchmark conditions
+
+study_name: transport-extended-qwen3
+all2all_backend: allgather_reducescatter
+output_root: ~/scratch/moe-breakdown-runs/expt2.5
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 42
+warmup_iters: 30
+measure_iters: 100
+collect_buckets: true
+bucket_profile_iters: 5
+bucket_full_events: true
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 512
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: qwen3_30b_a3b_moe
+    hidden_size: 2048
+    intermediate_size: 768
+    num_experts: 128
+    topk: 8
+    dtype: bfloat16
+
+routing_modes:
+  - uniform
+
+# Decode regime: [1..64], moderate: [128..8192], prefill + large: [16384..65536].
+# OOM note: at 65536 tokens with ep=1 all 128 experts are local (~1.2 GB weights);
+# activation memory adds ~268 MB. Should be well within H200 80 GB, but monitor
+# allocation logs if jobs fail.
+tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+
+parallel_points:
+  - {tp: 1, ep: 1}   # control: no inter-GPU collective
+  - {tp: 1, ep: 2}   # onset of transport sensitivity
+  - {tp: 1, ep: 4}   # maximum EP on 4-GPU node
+  - {tp: 2, ep: 2}   # TP+EP: both TP allreduce and EP allgather active
+
+# 8 transport conditions: ablation (4-cell factorial) + bandwidth rungs (dose-response).
+# nvlink_default + nvls_off + p2p_off + no_nvls_no_p2p = full 2×2 ablation.
+# no_nvls_no_p2p_{1,2,4,8}ch = bandwidth dose-response on PCIe.
+transport_conditions:
+  - nvlink_default
+  - nvls_off
+  - p2p_off
+  - no_nvls_no_p2p
+  - no_nvls_no_p2p_8ch
+  - no_nvls_no_p2p_4ch
+  - no_nvls_no_p2p_2ch
+  - no_nvls_no_p2p_1ch
+
+alphas: [1.0]
+
+slurm:
+  partition: ice-gpu
+  qos: coc-ice
+  time: 04:00:00
+  cpus_per_task: 8
+  gpus_per_node: 4
+  gpu_type: h200
+  use_gres: true
+  mem: 64G
+  modules: [gcc/12.3.0, python/3.11, cuda/12.1.1]
+  workdir: /home/hice1/sghose7/moe-breakdown
+  uv_env_dir: ~/scratch/moe-breakdown-venv
+  extra_sbatch_args:
+    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"
