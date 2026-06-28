@@ -68,6 +68,11 @@ fi
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPUS_PER_TASK}"
 export MASTER_PORT="${MASTER_PORT:-$((29500 + SLURM_JOB_ID % 10000))}"
+# NCCL 2.21+ defaults to P2P/CUMEM which requires peer GPUs to be in CUDA_VISIBLE_DEVICES.
+# SLURM --gpus-per-task=1 sets CUDA_VISIBLE_DEVICES=0 per rank, hiding peer GPUs.
+# CUMEM import then fails with "invalid device ordinal" (CUDA error 101).
+# Forcing legacy IPC P2P fixes this.
+export NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
 
 if [[ -z "${MASTER_ADDR:-}" && -n "${SLURM_NODELIST:-}" ]]; then
   export MASTER_ADDR
