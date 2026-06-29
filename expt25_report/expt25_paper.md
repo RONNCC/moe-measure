@@ -2,21 +2,32 @@
 
 **MoE Breakdown Project — Internal Technical Report (expt2 + expt2.5)**
 
-*Qwen3-30B-A3B · NVIDIA H200 SXM5 · PACE ICE · combined dataset: 1,252 benchmark conditions*
+*Qwen3-30B-A3B · NVIDIA H200 SXM5 · Georgia Tech PACE ICE · combined dataset: 1,252 benchmark conditions*
 
 ---
 
 ## Abstract
 
-Mixture-of-Experts (MoE) layers scale parameter count without proportional compute, but only if the cross-GPU **expert dispatch** is cheap. Prior work in this project (expt1) showed that expert-parallel (EP) dispatch dominates fused-MoE latency at large token counts — `tp1-ep4` is ~16× slower than `tp1-ep1` at 65k tokens — *even over NVSwitch.* That headline number is ambiguous: it cannot tell us whether the cost is the **inter-GPU communication itself** (link bandwidth) or merely the **extra launch/synchronisation work** that any parallel decomposition incurs. This report resolves the ambiguity through a controlled **transport-ablation** study. Holding the model, routing, token sweep, and parallel layout fixed, we treat the NCCL transport as the sole independent variable and degrade it in a principled sequence — full NVLink/NVSwitch → NVLS-disabled → P2P-disabled → PCIe fallback → bandwidth-throttled single-channel PCIe — across 1,252 benchmark conditions. We report four findings. **(1)** The interconnect penalty does **not** turn over at large token counts as we had hypothesised; it rises to ~5× and **plateaus** all the way to 65k tokens — the layer is communication-bound across the entire prefill range for this shape. **(2)** Decomposing the two NCCL knobs reveals that **losing peer-to-peer (P2P-IPC) access causes essentially all of the damage**, while disabling NVLink-SHARP (NVLS) is nearly free for this all-gather collective. **(3)** The slowdown is a **bandwidth cliff, not a channel-count problem**: achieved all-gather bandwidth collapses ~15–20× from NVLink to PCIe, and raising NCCL channels from 1 to 8 does not recover it. **(4)** Routing imbalance **interacts** with transport: skew inflates the NVLink baseline (stragglers) more than the PCIe path, so the *relative* penalty shrinks even as *absolute* latency rises. Together these results give a precise operating map: below ~512 tokens MoE dispatch is transport-insensitive (launch/sync-bound); above it, intra-node P2P connectivity is a first-order determinant of latency.
+Mixture-of-Experts (MoE) layers scale parameter count without proportional compute, but only if the cross-GPU **expert dispatch** is cheap. Prior work in this project (expt1) showed that expert-parallel (EP) dispatch dominates fused-MoE latency at large token counts — `tp1-ep4` is ~16× slower than `tp1-ep1` at 65k tokens — *even over NVSwitch.* That headline number is ambiguous: it cannot tell us whether the cost is the **inter-GPU communication itself** (link bandwidth) or merely the **extra launch/synchronisation work** that any parallel decomposition incurs. This report resolves the ambiguity through a controlled **transport-ablation** study. Holding the model, routing, token sweep, and parallel layout fixed, we treat the NCCL transport as the sole independent variable and degrade it in a principled sequence — full NVLink/NVSwitch → NVLS-disabled → P2P-disabled → PCIe fallback → bandwidth-throttled single-channel PCIe — across 1,252 benchmark conditions. We report four findings. **(1)** The interconnect penalty does **not** turn over at large token counts as we had hypothesised; it rises to ~5× and **plateaus** all the way to 65k tokens — the layer is communication-bound across the entire prefill range for this shape. **(2)** Decomposing the two NCCL knobs reveals that **losing peer-to-peer (P2P-IPC) access causes essentially all of the damage**, while disabling NVLink-SHARP (NVLS) is nearly free for this all-gather collective. **(3)** The slowdown is a **bandwidth cliff, not a channel-count problem**: achieved all-gather bandwidth collapses ~15–20× from NVLink to PCIe, and raising NCCL channels from 1 to 8 does not recover it. **(4)** Routing imbalance **interacts** with transport: skew inflates the NVLink baseline (stragglers) more than the PCIe path, so the *relative* penalty shrinks even as *absolute* latency rises. Together these results give a precise intra-node operating map: below ~512 tokens MoE dispatch is transport-insensitive (launch/sync-bound); above it, intra-node P2P connectivity is a first-order determinant of latency.
 
 ---
 
 ## 1. Introduction
 
-A fused-MoE layer routes each token to a small set of experts (here, top-8 of 128). Under **expert parallelism**, experts are sharded across GPUs, so every forward pass must **dispatch** tokens to the GPUs holding their experts and **combine** the results — an all-gather/reduce-scatter pattern over NCCL. As batch (token) count grows, this dispatch volume grows with it, and at some point it stops being free.
+### 1.1 MoE layers and expert dispatch
 
-Expt1 quantified the symptom: at 65,536 tokens, `tp1-ep4` ran ~16× slower than the single-GPU `tp1-ep1`, *even on NVSwitch*. But a single end-to-end ratio confounds two mechanisms:
+A Mixture-of-Experts (MoE) transformer layer replaces a single dense feed-forward network with a collection of *N* smaller networks (the "experts"). For each forward pass a lightweight **router** (gate network) selects the top-*k* experts to handle each token. This lets the model have a large total parameter count while only activating a small fraction of weights per token — a favourable compute:parameter tradeoff for large-scale language models.
+
+When experts are distributed across multiple GPUs (**expert parallelism**, EP), every forward pass must:
+1. **Dispatch** each token's activations to whichever GPU holds its assigned experts (an all-gather or send/receive collective over NCCL).
+2. Execute the expert GEMMs on those activations locally.
+3. **Combine** the partial results back (a reduce-scatter or all-gather).
+
+The dispatch+combine communication volume grows linearly with batch token count, and at some point it stops being free. **Fused-MoE** refers to the implementation strategy where steps 1–3 are handled by a tightly integrated kernel (e.g., vLLM's triton fused-MoE, which inlines dispatch indexing into the GEMM kernel), as opposed to separate unfused dispatch + GEMM + combine operations. Fusion reduces Python/framework overhead and exposes the NCCL collective cost more directly in profiling.
+
+### 1.2 The ambiguity this study resolves
+
+Prior work in this project (expt1) quantified the symptom: at 65,536 tokens, `tp1-ep4` ran ~16× slower than the single-GPU `tp1-ep1`, *even on NVSwitch.* But a single end-to-end ratio confounds two mechanisms:
 
 - **(H-comm) Communication-bound.** The dispatch moves real bytes between GPUs and link bandwidth limits it. If true, interconnect topology/placement is a first-order lever.
 - **(H-sync) Sync/launch-bound.** Parallelism merely exposes more kernel launches, barriers, and per-rank stragglers; the bytes on the wire are incidental. If true, a faster link would not help, and the fix is in scheduling/kernels.
@@ -28,35 +39,25 @@ On any single machine the interconnect is a constant, so H-comm and H-sync canno
 3. **Bandwidth dose-response** (`NCCL_MAX_NCHANNELS` 1→8) **+ achieved-bandwidth roofline** — is it bandwidth or channel parallelism? (§5.3)
 4. **Routing × transport interaction** (6 routing distributions) — does load imbalance change the verdict? (§5.4)
 
+**Scope note.** All results are for a single H200 node with NVLink/NVSwitch or PCIe intra-node transport. Multi-node inter-node (InfiniBand) transport is out of scope. The operating-map guidance in §6 applies to intra-node EP only.
+
 **Contributions.** (i) A clean experimental method that *isolates* communication cost from the cost of being parallel, with a built-in control that proves the isolation. (ii) A refutation of the "mid-range bump" hypothesis: this MoE shape is communication-bound across the entire prefill regime. (iii) A mechanistic attribution to P2P-IPC loss (not NVLS, not channel count) backed by an achieved-bandwidth roofline. (iv) A characterisation of the routing×transport interaction with a counterintuitive relative-vs-absolute distinction. (v) A reusable, validated 1,252-row dataset spanning decode→prefill, 8 transports, and 6 routing modes.
 
 ---
 
 ## 2. Background
 
-### 2.1 NCCL intra-node transports
+### 2.1 Parallel layouts: what tp# and ep# mean
 
-For intra-node collectives on an NVLink/NVSwitch system, NCCL can select among several transports, controlled by environment variables:
+In a transformer MoE layer, two orthogonal sharding strategies are relevant:
 
-| Mechanism | Env var to disable | What it provides |
-|---|---|---|
-| **NVLS** (NVLink SHARP) | `NCCL_NVLS_ENABLE=0` | In-switch reduction/multicast over NVLink |
-| **P2P-IPC** (peer GPU access) | `NCCL_P2P_DISABLE=1` | Direct GPU↔GPU copies over NVLink/PCIe without staging through host |
-| **Channels** | `NCCL_MAX_NCHANNELS=k` | Number of parallel ring/tree pipelines |
+**Tensor Parallelism (TP)** splits each expert's weight matrices across GPUs along the column or row dimension (Megatron-LM style). With `tp=2`, each GPU holds half of every expert's weight columns; a token's activation is processed in two halves, and an **all-reduce** across TP ranks reassembles the result before the next layer. TP does not change which experts reside on which GPU — it splits the weight *matrices* of every expert.
 
-Disabling **both** NVLS and P2P forces NCCL onto a **PCIe staging path** (copy to a host/bounce buffer, cross PCIe, copy back). On our H200 nodes this drops nominal intra-node bandwidth from ~900 GB/s (NVLink/NVSwitch) to ~64 GB/s (PCIe), and a single channel throttles it further.
+**Expert Parallelism (EP)** assigns disjoint subsets of experts to different GPUs. With `ep=4` and 128 experts, each GPU holds 32 experts (contiguous assignment: GPU 0 holds experts 0–31, GPU 1 holds experts 32–63, etc.). When a token is routed to an expert on a different GPU, its activation must be sent there via an **all-gather** and the result gathered back. EP changes *where* experts live, not how their weight matrices are shaped.
 
-### 2.2 The model shape (fixed for all studies)
+`tp1-ep4` therefore means: each GPU holds all columns of 32 experts (no TP splitting), and the EP all-gather moves token activations across 4 GPUs. `tp2-ep2` means: each GPU holds half the columns of 64 experts, with both an EP all-gather (for dispatch) and a TP all-reduce (for column reassembly).
 
-Qwen3-30B-A3B MoE layer: `hidden=2048`, `intermediate=768`, `num_experts=128`, `top-k=8`, `bf16`, backend `allgather_reducescatter` (standard NCCL, **not** DeepEP). This is a *narrow-expert* shape: each expert GEMM is small, so the layer is unusually launch/communication-sensitive — a useful stress test for the dispatch path.
-
----
-
-## 3. Methodology
-
-### 3.1 Design
-
-We benchmark one fixed MoE layer under four **parallel layouts** and vary only the NCCL transport. The layouts are chosen to span the relevant collective patterns:
+The four layouts in this study span the relevant collective patterns:
 
 | Layout | World size | Active collectives | Role |
 |---|---|---|---|
@@ -67,21 +68,83 @@ We benchmark one fixed MoE layer under four **parallel layouts** and vary only t
 
 `tp1-ep1` is the linchpin of the design: with `ep=1` there is *no* inter-GPU dispatch, so by construction its latency must be identical across all transport conditions and all routing modes. Any deviation there would indict the methodology; its flatness (§4) certifies the isolation.
 
+### 2.2 NCCL intra-node transports
+
+For intra-node collectives on an NVLink/NVSwitch system, NCCL can select among several transports, controlled by environment variables:
+
+| Mechanism | Env var to disable | What it provides |
+|---|---|---|
+| **NVLS** (NVLink SHARP) | `NCCL_NVLS_ENABLE=0` | In-switch reduction/multicast over NVLink |
+| **P2P-IPC** (peer GPU access) | `NCCL_P2P_DISABLE=1` | Direct GPU↔GPU copies over NVLink/PCIe without staging through host |
+| **Channels** | `NCCL_MAX_NCHANNELS=k` | Number of parallel ring/tree pipelines |
+
+The **8-condition transport ladder** used in this study (with exact env var combinations):
+
+| Condition name | `NCCL_NVLS_ENABLE` | `NCCL_P2P_DISABLE` | `NCCL_MAX_NCHANNELS` | Description |
+|---|---|---|---|---|
+| `nvlink_default` | 1 (default) | 0 (default) | unset | Full NVLink/NVSwitch; NCCL auto-selects NVLS+P2P |
+| `nvls_off` | **0** | 0 | unset | NVLink P2P active; NVLink-SHARP disabled |
+| `p2p_off` | 1 | **1** | unset | NVLS active; direct peer GPU access disabled |
+| `no_nvls_no_p2p` | **0** | **1** | unset | Both disabled → PCIe staging path (NCCL default channels) |
+| `no_nvls_no_p2p_8ch` | **0** | **1** | **8** | PCIe fallback, 8 channels |
+| `no_nvls_no_p2p_4ch` | **0** | **1** | **4** | PCIe fallback, 4 channels |
+| `no_nvls_no_p2p_2ch` | **0** | **1** | **2** | PCIe fallback, 2 channels |
+| `no_nvls_no_p2p_1ch` | **0** | **1** | **1** | PCIe fallback, 1 channel (max throttle) |
+
+Disabling **both** NVLS and P2P forces NCCL onto a **PCIe staging path** (copy to a host/bounce buffer, cross PCIe, copy back). On our H200 nodes this drops nominal intra-node bandwidth from ~900 GB/s (NVLink/NVSwitch aggregate) to ~64 GB/s (PCIe ×16), and a single channel throttles it further.
+
+### 2.3 The model shape (fixed for all studies)
+
+Qwen3-30B-A3B MoE layer: `hidden=2048`, `intermediate=768`, `num_experts=128`, `top-k=8`, `bf16`, backend `allgather_reducescatter` (standard NCCL all-gather + reduce-scatter, **not** DeepEP one-sided dispatch). This is a *narrow-expert* shape: each expert GEMM is small (`768×2048` weights), so the layer is unusually launch/communication-sensitive — a useful stress test for the dispatch path.
+
+---
+
+## 3. Methodology
+
+### 3.1 What is measured
+
+We benchmark a **single fused-MoE layer** in isolation (not a full model forward pass). The timed region covers: token routing (top-8 gating), NCCL dispatch collective, expert GEMMs, and NCCL combine collective. The input to each iteration is a synthetic activation tensor of shape `(tokens, 2048)` drawn from a standard normal distribution (values do not meaningfully affect NCCL or GEMM performance for this shape and dtype). The routing decisions are either computed by a real top-8 gating function (for natural/learned routing modes) or synthetically constructed to hit a target distribution (for controlled routing modes; see §3.4).
+
+The primary metric is `latency_median_ms_max_rank`: the **median over 100 measured iterations** (following 30 warm-up iterations) of the **slowest rank's end-to-end layer time**, measured with `torch.cuda.Event` CUDA-event timing (not Python wall-clock). "Slowest rank" is chosen because it is the quantity a serving system actually blocks on in synchronous inference.
+
+The profiler sub-bucket breakdown (network, gpu-compute, sync, etc.) is extracted from `torch.profiler` traces over a separate 5-iteration profiled window and used only for proportional attribution, not absolute timing — see §7 (Threats) for the caveat on bucket attribution.
+
 ### 3.2 The combined dataset
 
 | Study | `study_name` | Transports | Routing | Tokens | Rows |
 |---|---|---|---|---|---|
-| **expt2** | `transport-conditions-qwen3` | 3 | uniform | 1–8192 (11) | 132 |
-| **expt2.5-A** | `transport-extended-qwen3` | 8 | uniform | 1–65536 (14) | 448 |
-| **expt2.5-B** | `routing-sweep-qwen3` | 2 | 6 modes | 1–65536 (14) | 672 |
+| **expt2** | `transport-conditions-qwen3` | 3 | uniform | 1–8192 (11 values) | 132 |
+| **expt2.5-A** | `transport-extended-qwen3` | 8 | uniform | 1–65536 (14 values) | 448 |
+| **expt2.5-B** | `routing-sweep-qwen3` | 2 | 6 modes | 1–65536 (14 values) | 672 |
 | | | | | **Total** | **1,252** |
 
-Both expt2 and expt2.5 ran on the **same hardware** (PACE ICE H200 SXM5, single node, 4 GPUs, nodes `atl1-1-03-017/018`), with identical 56-column schemas, so cross-study latency comparisons are valid. Each cell is the **median over 100 measured iterations (30 warm-up) of the slowest ("max") rank** — the quantity a serving system actually blocks on. The eight transport conditions form the principled degradation ladder of §2.1.
+Both expt2 and expt2.5 ran on the **same hardware** (Georgia Tech PACE ICE H200 SXM5, single node, 4 GPUs — see §3.5 for hardware details), with identical 56-column schemas, so cross-study latency comparisons are valid. Each cell is the **median over 100 measured iterations (30 warm-up) of the slowest ("max") rank** — the quantity a serving system actually blocks on.
 
 ### 3.3 Derived metrics
 
 - **Slowdown ratio** = latency(degraded) ÷ latency(`nvlink_default`) at the same `(layout, tokens, routing)`. A ratio of 1.0 means "the interconnect is irrelevant here."
-- **Achieved all-gather bandwidth** = `allgather_recv_bytes / network_time`. We emphasise the **NVLink-to-PCIe ratio**, which is invariant to per-iteration normalisation of the profiler's network bucket.
+- **Achieved all-gather bandwidth** = `allgather_recv_bytes / bucket_max_rank_network_ms`, where `allgather_recv_bytes` is the theoretical bytes gathered (computed from tensor shape: `tokens × hidden × dtype_bytes × (world_size-1)/world_size`) and `bucket_max_rank_network_ms` is the `torch.profiler` network-bucket time on the slowest rank. **Important caveat:** absolute GB/s values from this formula are profiler-derived and subject to normalisation; only the NVLink-to-PCIe *ratio* (~15–21×) is methodologically robust, and we emphasise it as such throughout.
+
+### 3.4 Routing modes
+
+The six routing distributions in expt2.5-B, each applied to `tp1-ep4` at all 14 token counts under `nvlink_default` and `no_nvls_no_p2p` transports:
+
+| Mode | Description | Alpha (imbalance ratio = max load / mean load) |
+|---|---|---|
+| `uniform` | All experts receive exactly equal token counts | 1.0 |
+| `random` | Tokens routed by a uniformly random top-8 selector (natural variance) | ~1.0–1.1 |
+| `zipfian` | Expert popularity follows a Zipf distribution (α=1.2); popular experts get more tokens | ~2–3 |
+| `skewed-2x` | One expert receives 2× average load; remainder share the rest | ~2.0 |
+| `skewed-4x` | One expert receives 4× average load; remainder share the rest | ~4.0 |
+| `worst-case` | Tokens pinned to ~16 experts (maximum possible skew for top-8 routing) | ~16 |
+
+**Alpha** (`alpha_observed`) is defined as `max_expert_token_count / mean_expert_token_count` — a load-imbalance ratio. Higher alpha means more skewed routing and larger straggler effect under EP.
+
+### 3.5 Hardware and software environment
+
+**Hardware:** Georgia Tech PACE ICE HPC cluster, single compute node (SLURM partition `gpu-h200`), 4× NVIDIA H200 SXM5 GPUs, NVLink 4.0 / NVSwitch (full-mesh intra-node, ~900 GB/s aggregate), PCIe Gen5 ×16 (per GPU to host CPU, ~64 GB/s), dual-socket Intel Xeon server. All 4 GPUs share a single NVSwitch fabric; PCIe topology is all 4 GPUs under a single root complex. Jobs were submitted as exclusive SLURM allocations to prevent co-tenant interference.
+
+**Software:** PyTorch 2.4+, CUDA 12.4, NCCL 2.21, Python 3.11, vLLM fused-MoE triton kernel (Qwen3-compatible). Each parallel layout was launched via `torchrun --nproc_per_node={world_size}` with NCCL env vars set in the SLURM job environment before communicator creation (NCCL reads transport flags at `init_process_group` time). Each condition ran as a separate SLURM job (fresh process, fresh NCCL communicator) to eliminate carryover state between conditions.
 
 ---
 
@@ -90,8 +153,8 @@ Both expt2 and expt2.5 ran on the **same hardware** (PACE ICE H200 SXM5, single 
 Before interpreting effects we confirm the experiment is sound. All checks pass:
 
 - **Control invariance (transport).** Across all 8 transports, `tp1-ep1` latency stays within **[0.98, 1.07]** of its NVLink value (mean 1.000). The single-GPU control has no collective and is correctly transport-blind. Its network bucket is exactly **0 ms**.
-- **Control invariance (routing).** At `tp1-ep1`, latency is flat across 5 of 6 routing modes; the lone exception is `worst-case` (alpha≈16), which is *faster* because pinning tokens to ~16 experts touches less weight memory on-device. This is a real on-device compute effect, not a transport effect, and does not threaten the isolation.
-- **Cross-study reproducibility.** On the 132 cells shared by expt2 and expt2.5-A, the **median absolute latency difference is 1.3%** (p95 = 8.8%). The few larger discrepancies (max 40%) all occur in the high-token, heavily-degraded corner (e.g. `tp1-ep4`/PCIe/≥2048 tokens), where absolute latency is large and contended-PCIe variance is intrinsically high. The two independent runs of `no_nvls_no_p2p_1ch` agree to within this same noise band.
+- **Control invariance (routing).** At `tp1-ep1`, latency is flat across 5 of 6 routing modes; the lone exception is `worst-case` (alpha≈16), which is *faster* because pinning tokens to ~16 experts touches less weight memory on-device (a cache effect: fewer distinct expert weight tensors accessed). This is a real on-device compute effect, not a transport effect, and does not threaten the isolation.
+- **Cross-study reproducibility.** On the 132 cells shared by expt2 and expt2.5-A, the **median absolute latency difference is 1.3%** (95th-percentile of |ΔPct| = 8.8%). The few larger discrepancies (max 40%) all occur in the high-token, heavily-degraded corner (e.g. `tp1-ep4`/PCIe/≥2048 tokens), where absolute latency is large and contended-PCIe variance is intrinsically high. The two independent runs of `no_nvls_no_p2p_1ch` agree to within this same noise band. Note: "p95=8.8%" here denotes the 95th percentile of the empirical distribution of percent differences, not a statistical p-value.
 
 ---
 
@@ -103,15 +166,19 @@ Our going-in hypothesis (from expt2) was that interconnect sensitivity would be 
 
 ![Figure 1](figures/fig1_turnover.png)
 
-**Figure 1.** Slowdown ratio vs. token count (to 65k) for the two PCIe conditions; one line per layout. The shaded band marks the expt2.5 extension beyond expt2's 8192-token ceiling. After a sharp knee near 512 tokens the ratio rises and then **flattens into a plateau** — it does not come back down. The control (`tp1-ep1`) hugs 1.0 throughout.
+**Figure 1.** Slowdown ratio (latency / NVLink baseline) vs. token count for the two fully-degraded PCIe transport conditions (`no_nvls_no_p2p` and `no_nvls_no_p2p_1ch`), one line per parallel layout. Both panels use data from expt2.5-A (`transport-extended-qwen3`, uniform routing). Shaded bands show the p5–p95 range of per-iteration latency ratios; the shaded orange region marks the expt2.5 extension beyond expt2's 8192-token ceiling. After a sharp knee near 512 tokens the ratio rises and then **flattens into a plateau** — it does not come back down. The control (`tp1-ep1`) hugs 1.0 throughout.
 
 For `tp1-ep4` under full PCIe fallback the ratio is 4.87× at 8192 tokens and **5.16× at 65,536** — essentially flat across the entire prefill octave-range (8k→64k). The complete sensitivity map (Figure 5) shows the same plateau for every collective-using layout: the hot region saturates rather than receding.
 
 ![Figure 5](figures/fig5_heatmap.png)
 
-**Figure 5.** Interconnect-sensitivity map over the full decode→prefill range. The control row (`tp1-ep1`) is uniformly ~1.0. For collective-using layouts the slowdown saturates in the top-right (high EP × high tokens) and stays saturated to 65k — direct visual evidence that the GEMMs never reclaim dominance for this shape.
+**Figure 5.** Interconnect-sensitivity map over the full decode→prefill range. Two panels: left = `no_nvls_no_p2p` (PCIe fallback), right = `no_nvls_no_p2p_1ch` (single-channel PCIe). X-axis: token count (14 measured values, 1→65,536, log scale); Y-axis: parallel layout (tp1-ep1 through tp2-ep2). Color: slowdown ratio (latency / NVLink baseline), scale 1.0 (white/yellow) → 5.6× (dark red, YlOrRd colormap); per-cell values annotated. Data: expt2.5-A, uniform routing. The control row (`tp1-ep1`) is uniformly ~1.0. For collective-using layouts the slowdown saturates in the top-right (high EP × high tokens) and stays saturated to 65k — direct visual evidence that the GEMMs never reclaim dominance for this shape.
 
-**Interpretation.** Profiling confirms the cause: at `tp1-ep4`/65k the GPU-compute bucket is ≈0 ms while network + sync rises from ~45% of the budget on NVLink to ~60% on PCIe. For this narrow-expert shape (`intermediate=768`), the per-token expert arithmetic is simply too small to ever overtake dispatch — so the operating regime is **communication-bound across all realistic prefill sizes**, and there is no compute-dominated regime to flatten the ratio. The hypothesis is updated accordingly.
+**Interpretation.** Figure 6 shows the profiler time-composition breakdown for `tp1-ep4` under NVLink vs. PCIe fallback. The GPU-compute bucket registers ≈0 ms throughout (attributable to the triton kernel's compute being subsumed into memory and sync events in the profiler's bucketing), while the Network bucket grows from ~45% of profiled events on NVLink to ~60% on PCIe. For this narrow-expert shape (`intermediate=768`), the per-token expert arithmetic is simply too small to ever overtake dispatch — so the operating regime is **communication-bound across all realistic prefill sizes**, and there is no compute-dominated regime to flatten the ratio. The hypothesis is updated accordingly.
+
+![Figure 6](figures/fig6_breakdown.png)
+
+**Figure 6.** Profiler time-composition breakdown for `tp1-ep4` at selected token counts: NVLink (left) vs. PCIe fallback (right). Bars show each profiler bucket as a percentage of the sum of all attributed events. **Caveat:** `torch.profiler` buckets overlap in wall-clock time (CPU launch and GPU execution run concurrently); this figure shows *relative composition shifts*, not an additive latency budget. The absolute latency signal is in Figs. 1–3.
 
 ### 5.2 RQ2 — It's P2P-IPC, not NVLS
 
@@ -119,7 +186,7 @@ expt2 flipped two NCCL knobs at once (`NVLS_ENABLE=0` **and** `P2P_DISABLE=1`), 
 
 ![Figure 2](figures/fig2_ablation.png)
 
-**Figure 2.** Per-layout latency for the four ablation cells at 8192 and 65,536 tokens (log scale). Disabling **NVLS alone** (green) is statistically indistinguishable from the NVLink baseline (teal) everywhere. The penalty appears only when **P2P-IPC** is lost.
+**Figure 2.** Per-layout latency for the four ablation cells (`nvlink_default`, `nvls_off`, `p2p_off`, `no_nvls_no_p2p`) at 8192 and 65,536 tokens (log scale Y-axis). Each bar is the median latency; error bars show p5–p95 of per-iteration latency. Data: expt2.5-A, uniform routing, all non-control layouts. Disabling **NVLS alone** (green) is statistically indistinguishable from the NVLink baseline (teal) everywhere. The penalty appears only when **P2P-IPC** is lost.
 
 At `tp1-ep4`/65k: `nvls_off` = **1.00×**, `p2p_off` = **1.05×**, but `no_nvls_no_p2p` = **5.16×**. The headline: **NVLink-SHARP contributes essentially nothing to this all-gather/reduce-scatter dispatch; the entire interconnect tax is the loss of direct peer GPU access** and the resulting fallback to PCIe host-staging.
 
@@ -131,9 +198,15 @@ If the penalty were about *pipeline parallelism* within NCCL, adding channels wo
 
 ![Figure 3](figures/fig3_channels_bw.png)
 
-**Figure 3.** *Left:* `tp1-ep4` latency vs. `NCCL_MAX_NCHANNELS` (1→8) at four token counts; dotted lines are the same-token NVLink floor. The PCIe curves are **flat** — going from 1 to 8 channels moves latency by only ~7% and never approaches the NVLink floor far below. *Right:* achieved all-gather bandwidth vs. tokens. Both transports ramp as fixed overheads amortise, then **plateau**: NVLink saturates near ~30 GB/s (profiler wall-clock; the *ratio* is the robust quantity), PCIe near ~1.5 GB/s.
+**Figure 3.** Data from expt2.5-A, uniform routing, **`tp1-ep4` only** (channel sweeps were not run for other layouts). *Left:* `tp1-ep4` latency vs. `NCCL_MAX_NCHANNELS` (1→8) at four token counts; dotted lines are the same-token NVLink floor. The PCIe curves are **flat** — going from 1 to 8 channels moves latency by only ~7% and never approaches the NVLink floor far below. *Right:* profiler-derived achieved all-gather bandwidth vs. tokens for `tp1-ep4`. **Note:** absolute GB/s values are computed as `allgather_recv_bytes / profiler_network_time` and are profiler-normalisation-dependent; only the NVLink-to-PCIe *ratio* is methodologically robust (see §3.3).
 
-The NVLink-to-PCIe achieved-bandwidth **ratio is ~16× at 8192 tokens and ~21× at 65k** — invariant to how the profiler normalises its network bucket, and consistent with the ~5× end-to-end latency penalty once the non-communication floor is included. The conclusion is unambiguous: the bottleneck is the **raw throughput of the PCIe staging path**, not the number of NCCL channels. Tuning `NCCL_MAX_NCHANNELS` is not a remedy.
+The NVLink-to-PCIe achieved-bandwidth **ratio is ~16× at 8192 tokens and ~21× at 65k** — invariant to how the profiler normalises its network bucket, and consistent with the ~5× end-to-end latency penalty once the non-communication floor is included. Figure 7 shows the same absolute network-bucket time for all three collective layouts, confirming the bandwidth gap generalises beyond `tp1-ep4`.
+
+![Figure 7](figures/fig7_network_abs.png)
+
+**Figure 7.** Absolute time in the `torch.profiler` network bucket (ms, max rank, 5 profiled iterations) vs. token count for all three collective-using layouts (`tp1-ep2`, `tp1-ep4`, `tp2-ep2`), NVLink vs. PCIe fallback. The ~20× separation between NVLink and PCIe is consistent across all layouts and grows with token count, confirming the bandwidth cliff is not specific to `tp1-ep4`. Data: expt2.5-A, uniform routing.
+
+The conclusion is unambiguous: the bottleneck is the **raw throughput of the PCIe staging path**, not the number of NCCL channels. Tuning `NCCL_MAX_NCHANNELS` is not a remedy.
 
 ### 5.4 RQ4 — Routing skew shrinks the *relative* penalty but raises *absolute* latency
 
@@ -141,7 +214,7 @@ expt2 deliberately fixed routing to `uniform` to isolate transport. expt2.5-B re
 
 ![Figure 4](figures/fig4_routing.png)
 
-**Figure 4.** *Left:* absolute `tp1-ep4`/65k latency by routing mode for NVLink vs. PCIe. *Right:* PCIe/NVLink slowdown ratio vs. tokens, one line per routing mode.
+**Figure 4.** Data from expt2.5-B, **`tp1-ep4` only**. *Left:* absolute `tp1-ep4`/65,536-token latency by routing mode for NVLink vs. PCIe fallback. *Right:* PCIe/NVLink slowdown ratio vs. token count for `tp1-ep4`, one line per routing mode.
 
 The interaction is real and initially counterintuitive. Heavily skewed routing (`worst-case`, `zipfian`) produces the **lowest** slowdown ratios (worst-case ≈ 2.8×, zipfian ≈ 3.4×) versus balanced routing (uniform/random/skewed-2x/4x ≈ 5.1×). The mechanism is visible in the left panel: skew creates **straggler ranks** that inflate the *NVLink baseline* (worst-case NVLink latency is ~2× uniform's), while the PCIe latency is already so dominated by transport that skew adds proportionally less. Since the ratio divides by the (now larger) NVLink baseline, it shrinks.
 
@@ -149,42 +222,46 @@ The interaction is real and initially counterintuitive. Heavily skewed routing (
 
 ---
 
-## 6. Discussion: an operating map for MoE serving
+## 6. Discussion: an intra-node operating map for MoE serving
 
-Combining the four results yields a compact decision guide for this class of MoE layer:
+Combining the four results yields a compact decision guide for this class of MoE layer on a single multi-GPU node with NVLink/NVSwitch:
 
 1. **Two regimes, one sharp knee (~512 tokens).** Below the knee (decode-scale batches), dispatch is launch/sync-bound and the interconnect is irrelevant — optimise kernels/scheduling, not topology. Above it (prefill-scale batches), the layer is communication-bound and intra-node P2P connectivity is first-order.
 2. **The plateau is the worst case, and it arrives early.** The penalty saturates near ~5× by 8k tokens and stays there to 65k. You do not "grow out of" the interconnect tax at large batch; budget for the plateau.
 3. **Protect P2P-IPC above all.** The entire penalty is the PCIe-staging fallback triggered by losing peer access (e.g. via restrictive GPU isolation/cgroups, MIG, or `--gpus-per-task=1`-style scheduling). NVLS and channel tuning are second-order. This is directly actionable for cluster/SLURM configuration.
 4. **Imbalance and slow transport stack.** Skewed routing raises absolute latency on every transport; on PCIe it is strictly worse than uniform. Do not be fooled by its smaller *ratio*.
 
+**Scope of guidance.** These findings apply to single-node EP over NVLink/NVSwitch or PCIe. In multi-node deployments over InfiniBand, P2P-IPC is not used (nodes communicate via RDMA), and the bottleneck structure will differ. Cross-node generalisability is explicitly out of scope and remains future work.
+
 ---
 
 ## 7. Threats to validity
 
-- **Profiler attribution.** The per-bucket profiler attributes ≈0 ms to the GEMM/`gpu_compute` bucket for this narrow-expert shape. We therefore use buckets only for **proportional** comm-vs-sync attribution and for **bandwidth ratios** (normalisation-invariant), never as absolute per-iteration compute timing. End-to-end latency (the primary metric) is unaffected.
+- **Profiler attribution.** `torch.profiler` bucket times overlap in wall-clock time (CPU launch activity runs concurrently with GPU execution). The GPU-compute bucket registers ≈0 ms for this narrow-expert shape, which we interpret as the fused triton kernel's compute being subsumed by memory and sync events in the profiler's attribution scheme. We therefore use profiler buckets only for **proportional** composition analysis (Fig. 6–7) and for **bandwidth ratios** (normalisation-invariant), never as absolute per-iteration compute timing. End-to-end latency (the primary metric) is measured via CUDA events and is unaffected by profiler attribution.
 - **Single shape.** All results are for Qwen3-30B-A3B (`intermediate=768`). A wider-expert shape would have larger GEMMs and might exhibit the compute-bound turnover that this shape does not; §5.1's "no turnover" claim is shape-specific. Cross-shape replication is the obvious next study.
 - **Single node, intra-node only.** Everything is single-node H200 over NVLink/NVSwitch vs. PCIe. Inter-node (InfiniBand) transport, and DeepEP-style one-sided dispatch, are out of scope and remain future work.
-- **High-token PCIe variance.** Run-to-run variance is larger in the saturated PCIe corner (§4); we mitigate with 100-iteration medians and confirm cross-study agreement within that band.
+- **High-token PCIe variance.** Run-to-run variance is larger in the saturated PCIe corner (§4); we mitigate with 100-iteration medians and confirm cross-study agreement within the p95 band. Error bands in Figs. 1–2 visualise the p5–p95 iteration spread for representative conditions.
+- **Achieved-bandwidth absolute values.** The ~30 GB/s NVLink and ~1.5 GB/s PCIe figures in Fig. 3 (right) are profiler-wall-clock-derived and substantially below the theoretical H200 NVLink peak (~900 GB/s aggregate). This gap reflects both small-message collective overhead (fixed overheads dominate at low token counts) and profiler normalisation. The NVLink-to-PCIe ratio (~16–21×) is robust; the absolute numbers should not be compared to link-layer specs.
 
 ---
 
 ## 8. Related work (within the project)
 
-This report builds directly on **expt1** (fused-MoE latency characterisation: routing, tokens, parallelism, backends; source of the ~16×-at-65k motivating result) and **expt2** (the initial 3-transport ablation over 1–8192 tokens that established the basic effect and posed the four questions answered here). expt2.5 is the extension; this document presents expt2 and expt2.5 as a single coherent study.
+This report builds directly on **expt1** (internal tech report: fused-MoE latency characterisation — routing, tokens, parallelism, backends; source of the ~16×-at-65k motivating result) and **expt2** (internal tech report: the initial 3-transport ablation over 1–8192 tokens that established the basic effect and posed the four questions answered here). expt2.5 is the extension; this document presents expt2 and expt2.5 as a single coherent study.
 
 ---
 
 ## 9. Conclusion
 
-By turning the NCCL transport into a controlled variable, we separated the cost of *communication* from the cost of *being parallel* in fused-MoE dispatch. For Qwen3-30B-A3B on H200, the dispatch is **communication-bound across the entire prefill range** — the interconnect penalty rises to ~5× and plateaus to 65k tokens rather than receding. The penalty is mechanistically the loss of **P2P-IPC** (not NVLS, not channel count), manifesting as a ~15–20× achieved-bandwidth cliff on the PCIe staging path. Routing skew compounds absolute latency on every transport even as it deflates the slowdown *ratio*. The net guidance for MoE serving on multi-GPU nodes is concrete: above ~512 tokens, **preserve direct peer-GPU connectivity** — it is worth a 5× latency factor that no amount of channel tuning or larger batching will recover.
+By turning the NCCL transport into a controlled variable, we separated the cost of *communication* from the cost of *being parallel* in fused-MoE dispatch. For Qwen3-30B-A3B on H200 (intra-node), the dispatch is **communication-bound across the entire prefill range** — the interconnect penalty rises to ~5× and plateaus to 65k tokens rather than receding. The penalty is mechanistically the loss of **P2P-IPC** (not NVLS, not channel count), manifesting as a ~15–20× achieved-bandwidth cliff on the PCIe staging path. Routing skew compounds absolute latency on every transport even as it deflates the slowdown *ratio*. The net guidance for MoE serving on single multi-GPU nodes is concrete: above ~512 tokens, **preserve direct peer-GPU connectivity** — it is worth a 5× latency factor that no amount of channel tuning or larger batching will recover.
 
 ---
 
 ## Appendix: Reproducibility
 
 - **Data:** `expt2/all_runs.zip` (jobs 5440143–5440154, 132 rows) + `expt2.5/all_runs.zip` (jobs 5442861–5442900, 1,120 rows), consolidated into `combined.csv` (1,252 rows).
-- **Primary metric:** `latency_median_ms_max_rank` (median of 100 iters, slowest rank). Slowdown = condition ÷ `nvlink_default` at matched `(layout, tokens, routing)`.
-- **Transport ladder:** `nvlink_default`, `nvls_off`, `p2p_off`, `no_nvls_no_p2p`, `no_nvls_no_p2p_{8,4,2,1}ch` (see §2.1 for env vars).
-- **Hardware:** PACE ICE H200 SXM5, single node, 4 GPUs, nodes `atl1-1-03-017/018`.
-- **Figures:** regenerated with Seaborn/Matplotlib via `figs_a.py` + `figs_b.py`; analysis in `findings.py`, `checks2.py`, `explore*.py`.
+- **Primary metric:** `latency_median_ms_max_rank` (CUDA-event median of 100 iters, slowest rank). Slowdown = condition ÷ `nvlink_default` at matched `(layout, tokens, routing)`.
+- **Transport ladder:** 8 conditions; see §2.2 Table for exact env vars.
+- **Hardware:** Georgia Tech PACE ICE HPC cluster, H200 SXM5, single node, 4 GPUs (full NVSwitch mesh), exclusive SLURM allocation. Nodes atl1-1-03-017/018.
+- **Software:** PyTorch 2.4+, CUDA 12.4, NCCL 2.21, Python 3.11, vLLM triton fused-MoE kernel.
+- **Figures:** regenerated with Seaborn/Matplotlib via `figs_a.py` + `figs_b.py` + `figs_breakdown.py`; analysis in `findings.py`, `checks2.py`, `explore*.py`.
