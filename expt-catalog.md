@@ -30,7 +30,7 @@
 
 **Goal:** Quantify how much fused-MoE latency depends on fast intra-node GPU P2P communication (NVSwitch/NVLink) vs. PCIe fallback, by intentionally degrading NCCL transport and measuring latency across decode-like and prefill-like token regimes.
 
-**Hardware:** PACE ICE H100 SXM5, single-node, 4 GPUs/node
+**Hardware:** PACE ICE H200 SXM5, single-node, 4 GPUs/node (nodes atl1-1-03-017/018; originally targeted H100 but all H100 nodes had bad multi-GPU NCCL, switched to H200)
 
 **Shape:** Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
 
