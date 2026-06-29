@@ -1,0 +1,29 @@
+Yes — for the pure fused-MoE version, the study is **not** “run a chatbot and measure tokens/sec.” It is a controlled benchmark of one MoE layer/operator, where you feed in token activations plus routing decisions and measure how the fused expert computation changes when GPU-to-GPU communication is degraded. [docs.nvidia](https://docs.nvidia.com/megatron-core/developer-guide/nightly/apidocs/core/core.inference.moe.fused_moe.html)
+
+## Study goal
+
+The research question becomes: for a Mixtral-like fused MoE layer on your 2xH100 `NV18` node, how much performance depends on fast direct inter-GPU communication versus local compute and memory bandwidth.  This is motivated by prior H100 MoE benchmarking that studies Mixtral-like shapes, active-expert count, and fused MoE performance, but usually in broader framework-level settings rather than a tightly isolated operator study. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/30991097/105b5957-da66-4777-bd58-bce689af477c/check_h100_nccl_env_20260626_212542-2.txt
+
+## Harness design
+
+Use a **single fused MoE operator** with Mixtral-like settings: 8 experts, top-2 routing, hidden size 4096, FFN size 14336, and BF16 first, because recent MoE studies use Mixtral-8x7B-like configurations and explicitly analyze how throughput changes with FFN dimension, expert count, and active experts on H100 GPUs.  Run three transport conditions on the same node: default NCCL, `NCCL_P2P_DISABLE=1`, and `NCCL_P2P_DISABLE=1 NCCL_MAX_NCHANNELS=1`, since those settings disable direct P2P transport and reduce NCCL channel parallelism. [docs.nvidia](https://docs.nvidia.com/deeplearning/nccl/archives/nccl_247/nccl-developer-guide/docs/env.html)
+
+Sweep two regimes: decode-like small token counts and prefill-like large token counts, because the PyTorch H100 fused-MoE kernel analysis focuses on small-\(M\) behavior while MoE-Inference-Bench studies larger batch and sequence settings on H100.  A practical sweep is token counts \(M \in \{1,2,4,8,16,32,64\}\) for decode-like behavior and \(M \in \{128,512,2048,8192\}\) for prefill-like behavior, with 3 repetitions per point and metrics of latency, routed tokens/sec, and slowdown ratio relative to baseline. [github](https://github.com/NVIDIA/nvbandwidth)
+
+## Harness I/O
+
+The harness does **not** take a prompt and return a next token. NVIDIA’s fused-MoE API describes the operator input as `hidden_states` with shape `[num_tokens, hidden_size]` plus routing information such as a `routing_map`, and it returns an output tensor of shape `[num_tokens, hidden_size]` after fused `permute -> FC1 -> activation -> FC2 -> unpermute`. [docs.nvidia](https://docs.nvidia.com/megatron-core/developer-guide/nightly/apidocs/core/core.inference.moe.fused_moe.html)
+
+So the harness input is closer to “a batch of token embeddings/activations that already reached the MoE layer” than “raw text.”  The harness output is the transformed hidden states after expert routing and expert MLP computation, not logits and not sampled text. [docs.nvidia](https://docs.nvidia.com/megatron-core/developer-guide/nightly/apidocs/core/core.inference.moe.fused_moe.html)
+
+## What corresponds to prompts
+
+If you were running a real model, a prompt would first go through tokenization, embedding, attention blocks, and the router, and only then would one MoE layer receive the hidden-state matrix and expert assignments.  In the harness, you usually **skip** all of that and either synthesize or preload the hidden states and routing decisions so you can measure just the MoE operator itself with fewer confounding knobs than a full vLLM-style stack. [github](https://github.com/NVIDIA/nvbandwidth)
+
+A simple mental model is:  
+- Full LLM inference: `prompt -> many layers -> logits -> next token`.  
+- Fused-MoE harness: `hidden states + routing -> one MoE layer output`. [docs.nvidia](https://docs.nvidia.com/megatron-core/developer-guide/nightly/apidocs/core/core.inference.moe.fused_moe.html)
+
+## What needs to be done
+
+Implement or reuse a fused-MoE benchmark driver that allocates BF16 `hidden_states [M, 4096]`, MoE weights for 8 experts with FFN 14336, and a top-2 routing map, then runs forward passes under the three NCCL conditions on your verified 2xH100 `NV18` node.  The key result is not model quality but a curve showing how fused-MoE latency or throughput changes as token load increases and fast GPU P2P communication is disabled. [forums.developer.nvidia](https://forums.developer.nvidia.com/t/gpu-memory-how-to-find-the-gpu-memory-bandwidth/340)
