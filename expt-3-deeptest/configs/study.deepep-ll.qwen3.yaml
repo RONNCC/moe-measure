@@ -1,0 +1,85 @@
+# expt-3-deeptest: DeepEP Low Latency backend
+#
+# Benchmarks the deepep_low_latency all2all backend against the allgather_reducescatter
+# NCCL baseline (expt2/expt2.5) and the deepep_high_throughput sibling config.
+#
+# DeepEP Low Latency: one-sided RDMA dispatch via NVSHMEM, optimized for small
+# token counts (decode regime). Uses ncclGinRequest_t APIs — requires NCCL >= 2.30.4
+# and the pre-built deep_ep wheel.
+#
+# At ep=1, there is no inter-GPU expert dispatch, so LL and HT are identical.
+# The interesting comparison is ep>1 (tp1-ep2, tp1-ep4, tp2-ep2).
+#
+# Shape: Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
+# Hardware: PACE ICE H200 SXM5, single-node, 4 GPUs/node
+# Tokens: 14 values 1–65536 (same sweep as expt2.5)
+#
+# Total SLURM jobs: 4 parallel points × 1 transport = 4
+# Conditions per job: 1 routing × 14 tokens = 14
+# Grand total: 56 benchmark conditions
+
+study_name: deepep-ll-qwen3
+all2all_backend: deepep_low_latency
+output_root: ~/scratch/moe-breakdown-runs/expt-3-deeptest
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 42
+warmup_iters: 30
+measure_iters: 100
+collect_buckets: true
+bucket_profile_iters: 5
+bucket_full_events: true
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 512
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: qwen3_30b_a3b_moe
+    hidden_size: 2048
+    intermediate_size: 768
+    num_experts: 128
+    topk: 8
+    dtype: bfloat16
+
+routing_modes:
+  - uniform
+
+tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+
+parallel_points:
+  - {tp: 1, ep: 1}   # control: no inter-GPU dispatch (LL==HT here)
+  - {tp: 1, ep: 2}   # onset of expert dispatch
+  - {tp: 1, ep: 4}   # maximum EP on 4-GPU node
+  - {tp: 2, ep: 2}   # TP+EP combined
+
+# Single transport condition: baseline NVLink. DeepEP uses its own NVSHMEM transport
+# for expert dispatch; NCCL only handles TP collectives (when tp>1).
+transport_conditions:
+  - nvlink_default
+
+alphas: [1.0]
+
+slurm:
+  partition: ice-gpu
+  qos: coc-ice
+  time: 02:00:00
+  cpus_per_task: 8
+  gpus_per_node: 4
+  gpu_type: h200
+  use_gres: true
+  mem: 64G
+  modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
+  workdir: /home/hice1/sghose7/moe-breakdown
+  uv_env_dir: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv
+  deepep_wheel: /storage/ice1/0/2/sghose7/deepep-build/workspace/dist/deep_ep-2.0.0+d4f41e4-cp311-cp311-linux_x86_64.whl
+  extra_sbatch_args:
+    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"

@@ -1,0 +1,128 @@
+================================================================================
+EXPT-3-DEEPTEST: DeepEP Low Latency vs High Throughput Study — Catalog
+Last updated: 2026-06-29
+================================================================================
+
+OVERVIEW
+--------
+Compares deepep_low_latency and deepep_high_throughput all2all backends against
+each other (and implicitly against the NCCL allgather_reducescatter baseline
+from expt2/expt2.5) on the same Qwen3-30B-A3B shape and H200 hardware.
+
+Research question:
+  At what token count does deepep_high_throughput overtake deepep_low_latency?
+  How do both compare to NCCL NVLink at small and large token counts?
+
+Backend summary:
+  deepep_low_latency   : one-sided RDMA dispatch via NVSHMEM; optimized for
+                         decode-scale token counts; lower latency per call but
+                         less bandwidth-efficient at large batches.
+  deepep_high_throughput: collective-based dispatch; better bandwidth utilization
+                          at prefill-scale token counts; higher setup overhead.
+
+At ep=1: no inter-GPU expert dispatch → both backends are identical.
+         Use tp1-ep1 as a sanity check that the wheel+venv install is working.
+At ep>1: expert tokens are routed across GPUs via NVSHMEM; LL vs HT differ here.
+
+Shape: Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
+Backend: deepep_low_latency / deepep_high_throughput
+Routing: uniform (fixed — isolates backend effect)
+Warmup: 30 iters | Measure: 100 iters | Seed: 42
+Hardware: PACE ICE H200 SXM5, single-node, 4 GPUs/node
+
+================================================================================
+STUDY A: deepep-ll-qwen3
+================================================================================
+
+Config: expt-3-deeptest/configs/study.deepep-ll.qwen3.yaml
+Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ll-qwen3/
+
+Backend: deepep_low_latency
+Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+Transport condition: nvlink_default (no NCCL degradation)
+Parallel points: tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2
+Total SLURM jobs: 4
+Conditions per job: 14
+Grand total: 56 benchmark conditions
+
+================================================================================
+STUDY B: deepep-ht-qwen3
+================================================================================
+
+Config: expt-3-deeptest/configs/study.deepep-ht.qwen3.yaml
+Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ht-qwen3/
+
+Backend: deepep_high_throughput
+Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+Transport condition: nvlink_default
+Parallel points: tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2
+Total SLURM jobs: 4
+Conditions per job: 14
+Grand total: 56 benchmark conditions
+
+================================================================================
+COMBINED TOTALS
+================================================================================
+
+  Study A: 4 jobs | 56 conditions
+  Study B: 4 jobs | 56 conditions
+  Total:   8 jobs | 112 benchmark conditions
+
+Submit:
+  cd /home/hice1/sghose7/moe-breakdown
+
+  # Study A (DeepEP low latency)
+  python expt-3-deeptest/scripts/submit_slurm_study.py \
+      --config expt-3-deeptest/configs/study.deepep-ll.qwen3.yaml
+
+  # Study B (DeepEP high throughput)
+  python expt-3-deeptest/scripts/submit_slurm_study.py \
+      --config expt-3-deeptest/configs/study.deepep-ht.qwen3.yaml
+
+================================================================================
+ENGINEERING NOTES
+================================================================================
+
+NVSHMEM IBRC fix (discovered during expt-3-deeptest setup):
+  NVSHMEM IBRC (InfiniBand Reliable Connection) QP creation fails on PACE ICE
+  because IB verb permissions are not granted to user-space jobs.
+  Fix: disable IBRC and IBGDA, force P2P (NVLink) for intra-node transport.
+  Set in slurm/run_direct_moe_sweep.sbatch:
+    NVSHMEM_DISABLE_IBRC=1
+    NVSHMEM_DISABLE_IBGDA=1
+    NVSHMEM_TRANSPORT=p2p,ucx
+    NVSHMEM_BOOTSTRAP=uid
+
+NVSHMEM_QP_DEPTH assertion:
+  deepep low_latency_dispatch asserts:
+    nvshmem_qp_depth >= (tokens_dispatched_to_rank + 1) * 2
+  Default qp_depth = 1024, which covers only ≤511 tokens/rank.
+  With 65536 tokens and ep=4, worst case = 65536/4 = 16384 tokens/rank.
+  Fix: NVSHMEM_QP_DEPTH=16384 (set in sbatch).
+
+DeepEP wheel:
+  Built 2026-06-24 with CUDA 13.0.1 + NVSHMEM 3.3.24.
+  Path: /storage/ice1/0/2/sghose7/deepep-build/workspace/dist/
+        deep_ep-2.0.0+d4f41e4-cp311-cp311-linux_x86_64.whl
+  Not installed in moe-breakdown-venv (CUDA 12 venv). A separate venv is used:
+    UV_ENV_DIR: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv
+  The bootstrap_uv_env.sh installs nvidia-nccl-cu13>=2.30.4 + the wheel on
+  first run. FORCE_UV_REINSTALL=1 to rebuild if needed.
+
+CUDA module:
+  DeepEP requires CUDA 13 for ncclGinRequest_t GIN APIs (NCCL >= 2.30.4).
+  Use: modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
+  H200 nodes have the cuda13 feature tag confirming availability.
+
+Prior NVSHMEM blocker (expt1, H100):
+  expt1 limited DeepEP to tp1-ep1 only due to NVSHMEM IBRC failures.
+  With the IBRC/IBGDA disable fix and H200 NVLink, ep>1 should now work.
+  First time ep>1 DeepEP has been attempted on this cluster.
+
+================================================================================
+CURRENT STATUS — NOT YET SUBMITTED
+================================================================================
+
+No jobs submitted yet. Run submit commands above on the cluster.
+
+================================================================================
