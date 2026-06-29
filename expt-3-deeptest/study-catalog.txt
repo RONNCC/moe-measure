@@ -98,14 +98,20 @@ DeepEP LL mode token limit (discovered on first ep>1 run, 2026-06-29):
   Study A token range capped accordingly. HT mode is unaffected (different buffer formula).
   This is expected behavior: LL mode is designed for decode-scale token counts.
 
-NVSHMEM IBRC fix (discovered during expt-3-deeptest setup):
-  NVSHMEM IBRC (InfiniBand Reliable Connection) QP creation fails on PACE ICE
-  because IB verb permissions are not granted to user-space jobs.
-  Fix: disable IBRC and IBGDA, force P2P (NVLink) for intra-node transport.
+NVSHMEM IB transport fix (revised 2026-06-29):
+  NVSHMEM 3.3.24 has no env var to disable transport plugins — it loads all
+  .so files from its lib dir via dlopen and tries to init each. On PACE ICE,
+  IBRC/IBDEVX/IBGDA crash with SIGSEGV during init (IB verb permissions not
+  granted to user-space jobs). NVSHMEM_DISABLE_IBRC / NVSHMEM_TRANSPORT are
+  NOT recognized env vars in NVSHMEM 3.3.24 (silently ignored).
+  Fix: compile minimal stubs (nvshmemt_init returning 1 = failure) for all
+  three IB transport .so files, prepend stubs dir to LD_LIBRARY_PATH so
+  dlopen finds the stubs before the real .so files. NVSHMEM logs
+  "init failed for remote transport: ibrc/ibdevx/ibgda" and falls through
+  to P2P (NVLink) transport, which works fine on H200 SXM5.
+  Stubs: /home/hice1/sghose7/nvshmem-stubs/ (ibrc.so.3, ibdevx.so.3, ibgda.so.3)
   Set in slurm/run_direct_moe_sweep.sbatch:
-    NVSHMEM_DISABLE_IBRC=1
-    NVSHMEM_DISABLE_IBGDA=1
-    NVSHMEM_TRANSPORT=p2p,ucx
+    LD_LIBRARY_PATH=/home/hice1/sghose7/nvshmem-stubs:$LD_LIBRARY_PATH
     NVSHMEM_BOOTSTRAP=uid
 
 NVSHMEM_QP_DEPTH assertion:

@@ -64,14 +64,17 @@ if python -c "import nvidia.nccl" 2>/dev/null; then
   echo "[slurm] LD_LIBRARY_PATH set for NCCL: $NCCL_LIB_DIR"
 fi
 
-# NVSHMEM: IBRC QP creation fails on PACE ICE (IB verb permissions not granted).
-# Disable IBRC+IBGDA and force P2P (NVLink) for intra-node transport.
+# NVSHMEM: IB transports (ibrc, ibdevx, ibgda) crash on PACE ICE because IB verb
+# permissions are not granted to user-space jobs. NVSHMEM 3.3.24 has no env var to
+# disable transports — it discovers plugins via dlopen. We intercept the dlopen by
+# prepending a stubs directory that contains minimal nvshmemt_init() returning 1
+# (failure), which causes NVSHMEM to skip IB transports and use P2P (NVLink) / UCX.
+# Stubs built at: /home/hice1/sghose7/nvshmem-stubs/
 # NVSHMEM_QP_DEPTH: low_latency_dispatch asserts qp_depth >= (tokens_per_rank+1)*2;
-# 16384 covers our 65536-token worst-case (all tokens to one rank = 65536/ep).
+# 16384 covers our 8192-token worst-case (all tokens to one rank = 8192/ep).
 # NVSHMEM_BOOTSTRAP=uid avoids PMI/MPI dependency in SLURM srun launches.
-export NVSHMEM_DISABLE_IBRC="${NVSHMEM_DISABLE_IBRC:-1}"
-export NVSHMEM_DISABLE_IBGDA="${NVSHMEM_DISABLE_IBGDA:-1}"
-export NVSHMEM_TRANSPORT="${NVSHMEM_TRANSPORT:-p2p,ucx}"
+NVSHMEM_STUBS_DIR="${NVSHMEM_STUBS_DIR:-/home/hice1/sghose7/nvshmem-stubs}"
+export LD_LIBRARY_PATH="${NVSHMEM_STUBS_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export NVSHMEM_BOOTSTRAP="${NVSHMEM_BOOTSTRAP:-uid}"
 export NVSHMEM_QP_DEPTH="${NVSHMEM_QP_DEPTH:-16384}"
 export NVSHMEM_DEBUG="${NVSHMEM_DEBUG:-WARN}"
@@ -90,7 +93,7 @@ echo "[slurm] STUDY_CONFIG=$STUDY_CONFIG"
 echo "[slurm] TP_SIZE=$TP_SIZE EP_SIZE=$EP_SIZE WORLD_SIZE=$WORLD_SIZE"
 echo "[slurm] OUT_DIR=$OUT_DIR"
 echo "[slurm] TRANSPORT_CONDITION=${TRANSPORT_CONDITION:-nvlink_default}"
-echo "[slurm] NVSHMEM_DISABLE_IBRC=$NVSHMEM_DISABLE_IBRC NVSHMEM_TRANSPORT=$NVSHMEM_TRANSPORT"
+echo "[slurm] NVSHMEM IB stubs dir: ${NVSHMEM_STUBS_DIR} (first in LD_LIBRARY_PATH to skip ibrc/ibdevx/ibgda)"
 
 ARGS=(
   --config "$STUDY_CONFIG"
