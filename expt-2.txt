@@ -2,7 +2,7 @@ Yes — for the pure fused-MoE version, the study is **not** “run a chatbot an
 
 ## Study goal
 
-The research question becomes: for a Mixtral-like fused MoE layer on your 2xH100 `NV18` node, how much performance depends on fast direct inter-GPU communication versus local compute and memory bandwidth.  This is motivated by prior H100 MoE benchmarking that studies Mixtral-like shapes, active-expert count, and fused MoE performance, but usually in broader framework-level settings rather than a tightly isolated operator study. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/30991097/105b5957-da66-4777-bd58-bce689af477c/check_h100_nccl_env_20260626_212542-2.txt
+The research question becomes: for a Mixtral-like fused MoE layer on your 2xH100 `NV18` node, how much performance depends on fast direct inter-GPU communication versus local compute and memory bandwidth.  This is motivated by prior H100 MoE benchmarking that studies Mixtral-like shapes, active-expert count, and fused MoE performance, but usually in broader framework-level settings rather than a tightly isolated operator study. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/30991097/105b5957-da66-4777-bd58-bce689af477c/check_h100_nccl_env_20260626_212542-2.txt)
 
 ## Harness design
 
