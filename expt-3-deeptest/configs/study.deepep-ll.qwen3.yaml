@@ -53,7 +53,10 @@ kernel_shapes:
 routing_modes:
   - uniform
 
-tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+# LL mode buffer is sized as num_experts*max_tokens*msg_size; with hidden=2048 and
+# num_experts=128, the DeepEP legacy buffer INT assertion fires at max_tokens >= 16384.
+# Hard cap at 8192 (the largest safe power-of-2 for this shape).
+tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192]
 
 parallel_points:
   - {tp: 1, ep: 1}   # control: no inter-GPU dispatch (LL==HT here)

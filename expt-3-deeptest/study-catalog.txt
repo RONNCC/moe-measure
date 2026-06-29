@@ -38,12 +38,17 @@ Config: expt-3-deeptest/configs/study.deepep-ll.qwen3.yaml
 Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ll-qwen3/
 
 Backend: deepep_low_latency
-Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192]
+  NOTE: Hard cap at 8192. The DeepEP LL legacy buffer sizes the combine recv buffer
+  as num_experts * max_tokens * msg_size * 4; with hidden=2048 and num_experts=128,
+  max_tokens >= 16384 overflows the C++ assertion
+  (num_rdma_bytes / sizeof(int4) < INT_MAX) in buffer.hpp:112.
+  8192 is the largest safe power-of-2 for this shape.
 Transport condition: nvlink_default (no NCCL degradation)
 Parallel points: tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2
 Total SLURM jobs: 4
-Conditions per job: 14
-Grand total: 56 benchmark conditions
+Conditions per job: 11
+Grand total: 44 benchmark conditions
 
 ================================================================================
 STUDY B: deepep-ht-qwen3
@@ -64,9 +69,9 @@ Grand total: 56 benchmark conditions
 COMBINED TOTALS
 ================================================================================
 
-  Study A: 4 jobs | 56 conditions
-  Study B: 4 jobs | 56 conditions
-  Total:   8 jobs | 112 benchmark conditions
+  Study A: 4 jobs | 44 conditions  (LL: tokens capped at 8192)
+  Study B: 4 jobs | 56 conditions  (HT: full 14-token range)
+  Total:   8 jobs | 100 benchmark conditions
 
 Submit:
   cd /home/hice1/sghose7/moe-breakdown
@@ -82,6 +87,16 @@ Submit:
 ================================================================================
 ENGINEERING NOTES
 ================================================================================
+
+DeepEP LL mode token limit (discovered on first ep>1 run, 2026-06-29):
+  The DeepEP legacy buffer sizes the combine receive buffer as:
+    num_experts * max_tokens * msg_size * 4 buffers / 16 < INT_MAX
+  With hidden=2048, num_experts=128:
+    msg_size = 4160 bytes
+    Limit: max_tokens < 16384 (128 * 16384 * 4160 * 4 / 16 = 2,181,038,080 > INT_MAX)
+    Safe max: 8192 (ratio = 1,090,519,040 < INT_MAX)
+  Study A token range capped accordingly. HT mode is unaffected (different buffer formula).
+  This is expected behavior: LL mode is designed for decode-scale token counts.
 
 NVSHMEM IBRC fix (discovered during expt-3-deeptest setup):
   NVSHMEM IBRC (InfiniBand Reliable Connection) QP creation fails on PACE ICE
