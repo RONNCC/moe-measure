@@ -128,12 +128,20 @@ NCCL_NVLS_ENABLE=0 requirement on H100/H200:
   path is selected before trusting results from degraded-transport conditions.
 
 ================================================================================
-CURRENT STATUS — NOT YET SUBMITTED
+CURRENT STATUS — COMPLETE
 ================================================================================
 
-No jobs submitted yet. Run submit commands above on the cluster.
+All 40 jobs completed successfully (exit code 0:0).
 
-Cluster output will be at:
-  ~/scratch/moe-breakdown-runs/expt2.5/{transport-extended-qwen3,routing-sweep-qwen3}/
+  Submitted:  2026-06-28
+  Completed:  2026-06-28
+  Jobs:       5442861–5442900
+  Nodes:      atl1-1-03-017, atl1-1-03-018  (H200 SXM5, PACE ICE)
+  Duration:   ~30s–5min per job
+
+  Study A (5442861–5442892): 32 jobs COMPLETED
+  Study B (5442893–5442900):  8 jobs COMPLETED
+
+Results archived: expt2.5/all_runs.zip  (39 MB uncompressed, 7.2 MB compressed)
 
 ================================================================================

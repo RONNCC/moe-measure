@@ -78,8 +78,10 @@
 
 **Total: 40 jobs, 1120 benchmark conditions**
 
+**Results:** `expt2.5/all_runs.zip` — jobs 5442861–5442900 (all COMPLETED, 2026-06-28, nodes atl1-1-03-017/018)
+
 **Code:** `expt2.5/src/fused_moe_kernel_study/`
 
 **Configs:** `expt2.5/configs/`
 
-**Cluster storage:** `~/scratch/moe-breakdown-runs/expt2.5/` (not yet submitted)
+**Cluster storage:** `~/scratch/moe-breakdown-runs/expt2.5/`
