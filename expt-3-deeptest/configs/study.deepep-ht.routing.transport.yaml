@@ -1,0 +1,102 @@
+# expt-3-deeptest: DeepEP High Throughput — Routing × Bandwidth (Study E)
+#
+# Full factorial of routing imbalance × network bandwidth degradation.
+# This is the core "network matters" study: does routing skew amplify the latency
+# penalty of bandwidth-constrained transport? And does the penalty interact with
+# token count (decode vs prefill scale)?
+#
+# Research questions:
+#   1. Does routing imbalance make latency WORSE under PCIe-fallback transport?
+#      (Hypothesis: yes — skew increases effective data volume to hot GPUs, amplifying
+#       the already-limited PCIe bandwidth.)
+#   2. Is there a crossover: uniform routing tolerates PCIe degradation at large
+#      tokens, but skewed routing does not?
+#   3. At decode scale (small tokens), is the overhead compute-bound or network-bound?
+#      (network_ms / total_ms ratio, captured by bucket profiling.)
+#
+# Transport conditions (two extremes from expt2/2.5 baseline):
+#   nvlink_default   : NVLink/NVSwitch at full speed — best case
+#   no_nvls_no_p2p  : Full PCIe fallback (NCCL_NVLS_ENABLE=0 + NCCL_P2P_DISABLE=1)
+#
+# NOTE: These NCCL env vars affect the HT NCCL collectives (allgather/reducescatter
+# for TP, plus the all2all dispatch). LL uses NVSHMEM for dispatch — NCCL conditions
+# would only affect TP collectives (tp>1), but LL does not support tp>1. This study
+# is therefore HT-only.
+#
+# Routing modes: same 4 as Studies C/D (uniform, zipfian, skewed-2x, skewed-4x)
+# Token range: full 14-value sweep
+# Parallel points: all 4 (including tp2-ep2 which LL cannot use)
+#
+# SLURM jobs: 4 parallel points × 2 transports = 8
+# Conditions per job: 4 routing_modes × 14 tokens = 56
+# Grand total: 448 benchmark conditions
+
+study_name: deepep-ht-routing-transport-qwen3
+all2all_backend: deepep_high_throughput
+output_root: ~/scratch/moe-breakdown-runs/expt-3-deeptest
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 42
+warmup_iters: 30
+measure_iters: 100
+collect_buckets: true
+bucket_profile_iters: 5
+bucket_full_events: true
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 512
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: qwen3_30b_a3b_moe
+    hidden_size: 2048
+    intermediate_size: 768
+    num_experts: 128
+    topk: 8
+    dtype: bfloat16
+
+routing_modes:
+  - uniform
+  - zipfian
+  - skewed-2x
+  - skewed-4x
+
+tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+
+parallel_points:
+  - {tp: 1, ep: 1}   # control: no inter-GPU dispatch
+  - {tp: 1, ep: 2}   # onset of expert dispatch
+  - {tp: 1, ep: 4}   # maximum EP on 4-GPU node
+  - {tp: 2, ep: 2}   # TP+EP combined
+
+# Two extremes from expt2/2.5: best-case NVLink vs worst-case PCIe fallback.
+# See HANDOFF-CONTEXT.md for full glossary of transport conditions.
+transport_conditions:
+  - nvlink_default
+  - no_nvls_no_p2p
+
+alphas: [1.0]
+
+slurm:
+  partition: ice-gpu
+  qos: coc-ice
+  time: 04:00:00
+  cpus_per_task: 8
+  gpus_per_node: 4
+  gpu_type: h200
+  use_gres: true
+  mem: 64G
+  modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
+  workdir: /home/hice1/sghose7/moe-breakdown
+  uv_env_dir: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv
+  deepep_wheel: /storage/ice1/0/2/sghose7/deepep-build/workspace/dist/deep_ep-2.0.0+d4f41e4-cp311-cp311-linux_x86_64.whl
+  extra_sbatch_args:
+    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"

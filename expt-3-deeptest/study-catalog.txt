@@ -9,29 +9,51 @@ Compares deepep_low_latency and deepep_high_throughput all2all backends against
 each other (and implicitly against the NCCL allgather_reducescatter baseline
 from expt2/expt2.5) on the same Qwen3-30B-A3B shape and H200 hardware.
 
-Research question:
-  At what token count does deepep_high_throughput overtake deepep_low_latency?
-  How do both compare to NCCL NVLink at small and large token counts?
+Research thesis (full study suite):
+  Network and bandwidth are now first-class bottlenecks for MoE LLM inference —
+  more so than for dense models — and this effect is amplified by routing imbalance.
+  We show this through:
+    1. Backend comparison: LL vs HT at different token counts (decode vs prefill)
+    2. Routing sweep: how expert load imbalance interacts with each backend
+    3. Bandwidth congestion: routing × transport (NVLink vs PCIe fallback)
+    4. Resource budget: time breakdown into network vs compute (bucket profiling)
 
 Backend summary:
-  deepep_low_latency   : one-sided RDMA dispatch via NVSHMEM; optimized for
-                         decode-scale token counts; lower latency per call but
-                         less bandwidth-efficient at large batches.
-  deepep_high_throughput: collective-based dispatch; better bandwidth utilization
-                          at prefill-scale token counts; higher setup overhead.
+  deepep_low_latency    : one-sided RDMA dispatch via NVSHMEM; optimized for
+                          decode-scale token counts; lower per-call overhead but
+                          less bandwidth-efficient at large batches.
+                          On single-node H200: uses NVSHMEM NVLink P2P transport.
+                          NOTE: Empirically slower than HT at all token counts on
+                          H200 — likely because NVSHMEM P2P is slower than NCCL
+                          NVSwitch collectives. LL is designed for IB RDMA
+                          (multi-node). Single-node comparison favors HT.
+  deepep_high_throughput: collective-based dispatch using NCCL; better bandwidth
+                          utilization at prefill-scale; affected by NCCL transport
+                          conditions (NVLink vs PCIe fallback).
 
 At ep=1: no inter-GPU expert dispatch → both backends are identical.
-         Use tp1-ep1 as a sanity check that the wheel+venv install is working.
-At ep>1: expert tokens are routed across GPUs via NVSHMEM; LL vs HT differ here.
+         Use tp1-ep1 as a sanity check / pure compute baseline.
+At ep>1: expert tokens route across GPUs; LL via NVSHMEM, HT via NCCL all2all.
 
 Shape: Qwen3-30B-A3B (hidden=2048, inter=768, E=128, topk=8, bf16)
-Backend: deepep_low_latency / deepep_high_throughput
-Routing: uniform (fixed — isolates backend effect)
-Warmup: 30 iters | Measure: 100 iters | Seed: 42
 Hardware: PACE ICE H200 SXM5, single-node, 4 GPUs/node
+Warmup: 30 iters | Measure: 100 iters | Seed: 42
 
 ================================================================================
-STUDY A: deepep-ll-qwen3
+STUDY INDEX
+================================================================================
+
+  Label  Config                                      Backend  Routing        Transport       Jobs  Conditions
+  -----  ------------------------------------------  -------  -------------  --------------  ----  ----------
+  A      study.deepep-ll.qwen3.yaml                  LL       uniform only   nvlink_default     3          33
+  B      study.deepep-ht.qwen3.yaml                  HT       uniform only   nvlink_default     4          56
+  C      study.deepep-ll.routing.yaml                LL       4 modes        nvlink_default     3         132
+  D      study.deepep-ht.routing.yaml                HT       4 modes        nvlink_default     4         224
+  E      study.deepep-ht.routing.transport.yaml      HT       4 modes        2 transports       8         448
+                                                                                        Total:  22         893
+
+================================================================================
+STUDY A: deepep-ll-qwen3  [COMPLETE]
 ================================================================================
 
 Config: expt-3-deeptest/configs/study.deepep-ll.qwen3.yaml
@@ -44,18 +66,21 @@ Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192]
   max_tokens >= 16384 overflows the C++ assertion
   (num_rdma_bytes / sizeof(int4) < INT_MAX) in buffer.hpp:112.
   8192 is the largest safe power-of-2 for this shape.
-Transport condition: nvlink_default (no NCCL degradation)
+Transport condition: nvlink_default
 Parallel points: tp1-ep1, tp1-ep2, tp1-ep4
   NOTE: tp2-ep2 dropped. vLLM's DeepEP LL modular_kernel asserts
   a1.size(0)==num_experts/ep but internally re-shards by tp, yielding
   num_experts/(tp*ep) rows → assertion fails. tp>1 unsupported in this
   vLLM build's DeepEP LL path. HT is unaffected (different kernel path).
-Total SLURM jobs: 3
-Conditions per job: 11
-Grand total: 33 benchmark conditions
+Total SLURM jobs: 3 | Conditions per job: 11 | Grand total: 33
+
+Status:
+  tp1-ep1: job 5448990  COMPLETED (exit 0)
+  tp1-ep2: job 5449022  COMPLETED (exit 0)  ← first ep>1 LL success on H200
+  tp1-ep4: job 5449023  COMPLETED (exit 0)
 
 ================================================================================
-STUDY B: deepep-ht-qwen3
+STUDY B: deepep-ht-qwen3  [COMPLETE]
 ================================================================================
 
 Config: expt-3-deeptest/configs/study.deepep-ht.qwen3.yaml
@@ -65,28 +90,153 @@ Backend: deepep_high_throughput
 Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
 Transport condition: nvlink_default
 Parallel points: tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2
-Total SLURM jobs: 4
-Conditions per job: 14
-Grand total: 56 benchmark conditions
+Total SLURM jobs: 4 | Conditions per job: 14 | Grand total: 56
+
+Status:
+  tp1-ep1: job 5448822  COMPLETED (exit 0)
+  tp1-ep2: job 5448823  COMPLETED (exit 0)
+  tp1-ep4: job 5448824  COMPLETED (exit 0)
+  tp2-ep2: job 5448825  COMPLETED (exit 0)
+
+Results archived: expt-3-deeptest/all_runs.zip (7 run dirs, 89 conditions)
 
 ================================================================================
-COMBINED TOTALS
+STUDY C: deepep-ll-routing-qwen3  [PENDING SUBMISSION]
 ================================================================================
 
-  Study A: 3 jobs | 33 conditions  (LL: tokens capped at 8192; tp2-ep2 dropped)
-  Study B: 4 jobs | 56 conditions  (HT: full 14-token range)
-  Total:   7 jobs | 89 benchmark conditions
+Config: expt-3-deeptest/configs/study.deepep-ll.routing.yaml
+Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ll-routing-qwen3/
+
+Backend: deepep_low_latency
+Routing modes: uniform, zipfian, skewed-2x, skewed-4x
+  uniform   : equal probability across all 128 experts (baseline, repeats Study A)
+  zipfian   : power-law; expert 0 gets ~40% of traffic (realistic production skew)
+  skewed-2x : hot expert 2× expected share — mild imbalance (alpha=2.0)
+  skewed-4x : hot expert 4× expected share — heavy imbalance (alpha=4.0)
+  worst-case omitted: all tokens → topk=8 experts; risks LL buffer overflow at ep>1
+Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192] (capped at 8192)
+Transport: nvlink_default only (NVSHMEM; NCCL env vars do not apply)
+Parallel points: tp1-ep1, tp1-ep2, tp1-ep4
+Total SLURM jobs: 3 | Conditions per job: 44 | Grand total: 132
 
 Submit:
   cd /home/hice1/sghose7/moe-breakdown
-
-  # Study A (DeepEP low latency)
   python expt-3-deeptest/scripts/submit_slurm_study.py \
-      --config expt-3-deeptest/configs/study.deepep-ll.qwen3.yaml
+      --config expt-3-deeptest/configs/study.deepep-ll.routing.yaml
 
-  # Study B (DeepEP high throughput)
+================================================================================
+STUDY D: deepep-ht-routing-qwen3  [PENDING SUBMISSION]
+================================================================================
+
+Config: expt-3-deeptest/configs/study.deepep-ht.routing.yaml
+Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ht-routing-qwen3/
+
+Backend: deepep_high_throughput
+Routing modes: uniform, zipfian, skewed-2x, skewed-4x (same as Study C)
+Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+Transport: nvlink_default only (isolates routing effect; see Study E for transport)
+Parallel points: tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2
+Total SLURM jobs: 4 | Conditions per job: 56 | Grand total: 224
+
+Submit:
   python expt-3-deeptest/scripts/submit_slurm_study.py \
-      --config expt-3-deeptest/configs/study.deepep-ht.qwen3.yaml
+      --config expt-3-deeptest/configs/study.deepep-ht.routing.yaml
+
+================================================================================
+STUDY E: deepep-ht-routing-transport-qwen3  [PENDING SUBMISSION]
+================================================================================
+
+Config: expt-3-deeptest/configs/study.deepep-ht.routing.transport.yaml
+Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ht-routing-transport-qwen3/
+
+Backend: deepep_high_throughput
+Routing modes: uniform, zipfian, skewed-2x, skewed-4x
+Transport conditions:
+  nvlink_default  : NVLink/NVSwitch at full speed (best case)
+  no_nvls_no_p2p : PCIe fallback (NCCL_NVLS_ENABLE=0 + NCCL_P2P_DISABLE=1; worst case)
+  These are the same two extremes used in expt2/expt2.5 baseline, enabling direct
+  comparison: NCCL baseline vs DeepEP HT under identical transport conditions.
+Tokens: full 14-value sweep
+Parallel points: tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2
+Total SLURM jobs: 8 | Conditions per job: 56 | Grand total: 448
+
+NOTE on LL transport study: NCCL transport conditions do not affect DeepEP LL
+dispatch (NVSHMEM-based). Transport conditions only affect TP allreduce collectives
+(tp>1), which LL does not support. Study E is therefore HT-only. For LL bandwidth
+sensitivity, a multi-node IB study would be needed (future work).
+
+Submit:
+  python expt-3-deeptest/scripts/submit_slurm_study.py \
+      --config expt-3-deeptest/configs/study.deepep-ht.routing.transport.yaml
+
+================================================================================
+ANALYSIS GUIDE — TIME BUDGET DECOMPOSITION
+================================================================================
+
+The bucket profiler records per-iteration CUDA events for:
+  bucket_max_rank_network_ms  : time in NCCL collectives (allgather + reducescatter)
+  bucket_max_rank_gpu_compute_ms : time in GPU compute (expert GEMMs)
+
+Derived metrics:
+  network_fraction = network_ms / (network_ms + gpu_compute_ms)
+  achieved_bw_GBps = allgather_recv_bytes / (network_ms * 1e-3 * 1e9)
+
+Caveat for DeepEP LL: network_ms = 0 for LL runs. NVSHMEM dispatch ops are not
+captured by NCCL CUDA events. Total latency (latency_median_ms_max_rank) remains
+valid; the decomposition is unavailable for LL. This is a known instrumentation gap.
+  → To show time budget for LL, future work: add CUDA event wrappers around the
+    NVSHMEM dispatch calls in moe_kernel.py.
+
+For DeepEP HT: NCCL events DO capture the collective dispatch, so network_ms/
+gpu_compute_ms breakdown is valid. Use Study E to show how routing skew shifts the
+network fraction under bandwidth congestion.
+
+Key comparisons enabled by the full study suite:
+  1. Study A vs B (same conditions): LL latency vs HT latency across token counts
+     → Shows LL is slower on single-node H200 (NVSHMEM P2P < NCCL NVSwitch)
+  2. Study C: Does routing skew increase LL latency? And does it scale with skew?
+     → LL queue depth hypothesis: heavy skew overflows per-expert dispatch queues
+  3. Study D vs Study B: Does adding routing skew to HT matter at all token counts?
+     → HT all-to-all is symmetric, but data volume asymmetry may still hurt
+  4. Study E (nvlink vs no_nvls_no_p2p): Does routing skew amplify bandwidth sensitivity?
+     → Key claim: skewed routing under PCIe fallback is disproportionately slow
+  5. Across Studies B/D/E vs expt2.5 routing sweep: Does DeepEP HT help or hurt
+     under bandwidth congestion compared to plain NCCL allgather_reducescatter?
+
+================================================================================
+ROADMAP — FUTURE EXTENSIONS
+================================================================================
+
+These are not yet implemented but represent the full study vision:
+
+MULTI-NODE STUDY (requires 2+ nodes on PACE ICE or another multi-node cluster)
+  - EP8 (2 nodes × 4 GPUs), EP16 (4 nodes × 4 GPUs) — inter-node IB RDMA
+  - LL is designed for this regime (IB RDMA dispatch); expected to be competitive
+  - Transport conditions: IB full-speed vs throttled BW (if cluster supports)
+  - Config change: slurm.min_nodes > 1, larger parallel_points
+  - NVSHMEM stubs: IB stubs must be REMOVED for multi-node (need real IB transport)
+  - Estimated: 2-3 new configs, ~8-16 jobs each
+
+ADDITIONAL MODEL SHAPES
+  - DeepSeek-V3 style: hidden=7168, inter=2048, E=256, topk=8 (larger, more experts)
+  - Mixtral style: hidden=4096, inter=14336, E=8, topk=2 (fewer, larger experts)
+  - Comparing shapes shows how E (number of experts) and hidden_size interact with
+    LL buffer limits, HT collective volume, and routing imbalance sensitivity
+
+RESOURCE UTILIZATION INSTRUMENTATION
+  Currently missing: GPU SM utilization %, DRAM bandwidth %, achieved NVSHMEM BW
+  To add:
+    - pynvml sampling thread during benchmark iterations (GPU util, memory BW)
+    - torch.cuda.memory_stats() after each warmup/measure phase
+    - For NVSHMEM: NVSHMEM_DEBUG=INFO logs bytes-per-rank per call; could parse
+    - Add to reporting.py / runner.py as optional --profile-utilization flag
+  These would strengthen the "network starves GPU" narrative with direct evidence
+  (low SM utilization during dispatch, high network_fraction under skewed routing)
+
+IB TRANSPORT CONDITIONS (multi-node only)
+  - NVSHMEM IB bandwidth throttling (if supported via ib_set_port_rate or tc qdisc)
+  - NCCL IB channel count degradation (analogous to NCCL_MAX_NCHANNELS for InfiniBand)
+  - Shows whether LL or HT is more sensitive to IB bandwidth reduction
 
 ================================================================================
 ENGINEERING NOTES
@@ -99,8 +249,7 @@ DeepEP LL mode token limit (discovered on first ep>1 run, 2026-06-29):
     msg_size = 4160 bytes
     Limit: max_tokens < 16384 (128 * 16384 * 4160 * 4 / 16 = 2,181,038,080 > INT_MAX)
     Safe max: 8192 (ratio = 1,090,519,040 < INT_MAX)
-  Study A token range capped accordingly. HT mode is unaffected (different buffer formula).
-  This is expected behavior: LL mode is designed for decode-scale token counts.
+  Studies A/C token range capped accordingly. HT mode is unaffected.
 
 NVSHMEM IB transport fix (revised 2026-06-29):
   NVSHMEM 3.3.24 has no env var to disable transport plugins — it loads all
@@ -108,70 +257,48 @@ NVSHMEM IB transport fix (revised 2026-06-29):
   IBRC/IBDEVX/IBGDA crash with SIGSEGV during init (IB verb permissions not
   granted to user-space jobs). NVSHMEM_DISABLE_IBRC / NVSHMEM_TRANSPORT are
   NOT recognized env vars in NVSHMEM 3.3.24 (silently ignored).
-  Fix: compile minimal stubs (nvshmemt_init returning 1 = failure) for all
-  three IB transport .so files, prepend stubs dir to LD_LIBRARY_PATH so
-  dlopen finds the stubs before the real .so files. NVSHMEM logs
-  "init failed for remote transport: ibrc/ibdevx/ibgda" and falls through
-  to P2P (NVLink) transport, which works fine on H200 SXM5.
-  Stubs: /home/hice1/sghose7/nvshmem-stubs/ (ibrc.so.3, ibdevx.so.3, ibgda.so.3)
+  LD_LIBRARY_PATH prepend approach failed: libnvshmem_host.so has DT_RPATH=${ORIGIN},
+  which takes priority over LD_LIBRARY_PATH.
+  Fix: replace the actual transport .so files in the venv at their RPATH location
+  with stubs (nvshmemt_init returning 1 = failure). Originals backed up as .so.3.orig.
+  Replaced: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv/lib/
+    python3.11/site-packages/nvidia/nvshmem/lib/
+      nvshmem_transport_ibrc.so.3   → stub
+      nvshmem_transport_ibdevx.so.3 → stub
+      nvshmem_transport_ibgda.so.3  → stub
   Set in slurm/run_direct_moe_sweep.sbatch:
-    LD_LIBRARY_PATH=/home/hice1/sghose7/nvshmem-stubs:$LD_LIBRARY_PATH
-    NVSHMEM_BOOTSTRAP=uid
+    LD_LIBRARY_PATH=/home/hice1/sghose7/nvshmem-stubs:$LD_LIBRARY_PATH (belt+suspenders)
+    NVSHMEM_BOOTSTRAP=uid (avoids PMI/MPI dependency)
 
 NVSHMEM_QP_DEPTH assertion:
   deepep low_latency_dispatch asserts:
     nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
-  num_max_dispatch_tokens_per_rank is derived from the buffer's max_tokens, not
-  the actual batch size. With max_tokens=8192: need (8192+1)*2 = 16386.
+  With max_tokens=8192: need (8192+1)*2 = 16386.
   NVSHMEM_QP_DEPTH=16384 fails by 2. Fix: NVSHMEM_QP_DEPTH=32768 (set in sbatch).
 
 DeepEP wheel:
   Built 2026-06-24 with CUDA 13.0.1 + NVSHMEM 3.3.24.
   Path: /storage/ice1/0/2/sghose7/deepep-build/workspace/dist/
         deep_ep-2.0.0+d4f41e4-cp311-cp311-linux_x86_64.whl
-  Not installed in moe-breakdown-venv (CUDA 12 venv). A separate venv is used:
+  Separate venv required (CUDA 13 vs CUDA 12 in main moe-breakdown-venv):
     UV_ENV_DIR: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv
-  The bootstrap_uv_env.sh installs nvidia-nccl-cu13>=2.30.4 + the wheel on
-  first run. FORCE_UV_REINSTALL=1 to rebuild if needed.
+  bootstrap_uv_env.sh installs nvidia-nccl-cu13>=2.30.4 + the wheel on first run.
+  FORCE_UV_REINSTALL=1 to rebuild if needed.
 
 CUDA module:
   DeepEP requires CUDA 13 for ncclGinRequest_t GIN APIs (NCCL >= 2.30.4).
   Use: modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
-  H200 nodes have the cuda13 feature tag confirming availability.
+
+DeepEP tp>1 limitation (LL only):
+  vLLM's DeepEP LL modular_kernel.py:807 asserts a1.size(0)==num_experts/ep.
+  LL prepare path returns a1 with num_experts/(tp*ep) rows (re-sharded by TP).
+  For tp=2, ep=2: 128/(2*2)=32 rows but assertion expects 128/2=64. FAILS.
+  HT kernel path does not have this assertion. tp2-ep2 only valid for HT.
 
 Prior NVSHMEM blocker (expt1, H100):
   expt1 limited DeepEP to tp1-ep1 only due to NVSHMEM IBRC failures.
   With the IBRC/IBGDA disable fix and H200 NVLink, ep>1 now works on H200.
   First confirmed ep>1 DeepEP run on this cluster: jobs 5449022 (tp1-ep2),
   5449023 (tp1-ep4).
-
-NVSHMEM IB transport — in-place stub replacement (2026-06-29):
-  LD_LIBRARY_PATH prepend approach failed: libnvshmem_host.so has
-  DT_RPATH=${ORIGIN}, which takes priority over LD_LIBRARY_PATH.
-  Fix: replace the actual transport .so files in the venv at their RPATH
-  location with stubs. Originals backed up as .so.3.orig.
-  Replaced: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv/lib/
-    python3.11/site-packages/nvidia/nvshmem/lib/
-      nvshmem_transport_ibrc.so.3   → stub
-      nvshmem_transport_ibdevx.so.3 → stub
-      nvshmem_transport_ibgda.so.3  → stub
-
-================================================================================
-CURRENT STATUS — COMPLETE (2026-06-29)
-================================================================================
-
-Study A (deepep-ll-qwen3) — COMPLETE:
-  tp1-ep1: job 5448990  COMPLETED (exit 0)
-  tp1-ep2: job 5449022  COMPLETED (exit 0)  ← first ep>1 LL success on H200
-  tp1-ep4: job 5449023  COMPLETED (exit 0)
-  tp2-ep2: not run (vLLM DeepEP LL does not support tp>1)
-
-Study B (deepep-ht-qwen3) — COMPLETE:
-  tp1-ep1: job 5448822  COMPLETED (exit 0)
-  tp1-ep2: job 5448823  COMPLETED (exit 0)
-  tp1-ep4: job 5448824  COMPLETED (exit 0)
-  tp2-ep2: job 5448825  COMPLETED (exit 0)
-
-Results archived: expt-3-deeptest/all_runs.zip (7 run dirs, 89 conditions)
 
 ================================================================================
