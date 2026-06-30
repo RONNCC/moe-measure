@@ -64,14 +64,12 @@ if python -c "import nvidia.nccl" 2>/dev/null; then
   echo "[slurm] LD_LIBRARY_PATH set for NCCL: $NCCL_LIB_DIR"
 fi
 
-# NVSHMEM: IB transports (ibrc, ibdevx, ibgda) crash on PACE ICE because IB verb
-# permissions are not granted to user-space jobs. NVSHMEM 3.3.24 has no env var to
-# disable transports — it discovers plugins via dlopen. We intercept the dlopen by
-# prepending a stubs directory that contains minimal nvshmemt_init() returning 1
-# (failure), which causes NVSHMEM to skip IB transports and use P2P (NVLink) / UCX.
-# Stubs built at: /home/hice1/sghose7/nvshmem-stubs/
+# NVSHMEM: ibrc and ibdevx transports crash on PACE ICE (exit 139). Stubs at
+# /home/hice1/sghose7/nvshmem-stubs/ intercept dlopen with nvshmemt_init()→1 to
+# skip them. ibgda (IBGDA/GPU Direct RDMA) is NOT stubbed — gdrdrv and
+# nvidia_peermem are loaded on compute nodes, so ibgda can load for LL multi-node.
 # NVSHMEM_QP_DEPTH: low_latency_dispatch asserts qp_depth >= (tokens_per_rank+1)*2;
-# 16384 covers our 8192-token worst-case (all tokens to one rank = 8192/ep).
+# 32768 covers our 8192-token worst-case with margin.
 # NVSHMEM_BOOTSTRAP=uid avoids PMI/MPI dependency in SLURM srun launches.
 NVSHMEM_STUBS_DIR="${NVSHMEM_STUBS_DIR:-/home/hice1/sghose7/nvshmem-stubs}"
 export LD_LIBRARY_PATH="${NVSHMEM_STUBS_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -93,7 +91,7 @@ echo "[slurm] STUDY_CONFIG=$STUDY_CONFIG"
 echo "[slurm] TP_SIZE=$TP_SIZE EP_SIZE=$EP_SIZE WORLD_SIZE=$WORLD_SIZE"
 echo "[slurm] OUT_DIR=$OUT_DIR"
 echo "[slurm] TRANSPORT_CONDITION=${TRANSPORT_CONDITION:-nvlink_default}"
-echo "[slurm] NVSHMEM IB stubs dir: ${NVSHMEM_STUBS_DIR} (first in LD_LIBRARY_PATH to skip ibrc/ibdevx/ibgda)"
+echo "[slurm] NVSHMEM stubs dir: ${NVSHMEM_STUBS_DIR} (stubs ibrc/ibdevx only; ibgda is real)"
 
 ARGS=(
   --config "$STUDY_CONFIG"

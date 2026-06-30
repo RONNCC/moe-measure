@@ -1,44 +1,33 @@
 # expt-3-deeptest: DeepEP High Throughput — Multi-Node (Study G)
 #
-# Scales DeepEP HT to 2 and 4 nodes (ep8, ep16) on PACE ICE H200.
+# Scales DeepEP HT from single-node (ep8) to 2-node (ep16) on PACE ICE H200.
 # This is the critical study for the "network matters across nodes" claim:
 # at single-node, GPUs communicate via NVLink/NVSwitch (fast). At multi-node,
 # traffic crosses the IB fabric, exposing the full inter-node bandwidth bottleneck.
 #
+# DeepEP topology constraint: LEGACY_NUM_MAX_NVL_PEERS=8 hardcodes NVLink domains.
+# Each physical node MUST contribute exactly 8 GPUs (full HGX node) so each node maps
+# to one rdma_rank domain. Minimum multi-node config: ep=16 on 2 nodes × 8 GPUs/node.
+# PACE ICE H200 nodes have 8x H200 SXM5 (confirmed via sinfo: gpu:h200:8(S:0-3)).
+#
 # Research questions:
-#   Does DeepEP HT scale well from 1→2→4 nodes? Is latency dominated by IB
+#   Does DeepEP HT scale well from 1→2 nodes? Is latency dominated by IB
 #   bandwidth at large token counts? Does routing imbalance become more severe
 #   at multi-node due to uneven IB traffic?
 #
-# HT uses NCCL for expert dispatch — NCCL handles IB automatically.
-# No NVSHMEM stubs needed (stubs are only for LL mode).
-#
-# IMPORTANT: This config requires inter-node IB connectivity, which works for
-# NCCL (HT) on PACE ICE. LL mode requires NVSHMEM IB transport (currently
-# disabled via stubs). A separate LL multi-node study needs stub removal.
-#
 # Parallel points:
 #   tp1-ep1 : 1 GPU total — single-GPU control (no dispatch)
-#   tp1-ep4 : 4 GPUs (1 node) — intra-node baseline
-#   tp1-ep8 : 8 GPUs (2 nodes) — first inter-node hop
-#   tp1-ep16: 16 GPUs (4 nodes) — maximum scale on PACE ICE
+#   tp1-ep8 : 8 GPUs, 1 full node — intra-node NVLink (rdma_rank=0 for all ranks)
+#   tp1-ep16: 16 GPUs, 2 nodes × 8 GPUs — first IB hop (rdma_rank 0 vs 1)
 #
 # SLURM resources:
 #   tp1-ep1  : 1 node, 1 GPU
-#   tp1-ep4  : 1 node, 4 GPUs
-#   tp1-ep8  : 2 nodes, 4 GPUs/node (min_nodes=2 ensures multi-node allocation)
-#   tp1-ep16 : 4 nodes, 4 GPUs/node
+#   tp1-ep8  : 1 node, 8 GPUs (full node)
+#   tp1-ep16 : 2 nodes, 8 GPUs/node
 #
-# SLURM jobs: 4 parallel points × 1 transport = 4
+# SLURM jobs: 3 parallel points × 1 transport = 3
 # Conditions per job: 1 shape × 1 routing × 14 tokens = 14
-# Grand total: 56 benchmark conditions
-#
-# NOTE on min_nodes: The submit script computes
-#   nodes = max(slurm.min_nodes, ceil(world_size / gpus_per_node))
-# For ep=8: max(2, ceil(8/4)) = 2. For ep=16: max(4, ceil(16/4)) = 4.
-# min_nodes=2 here ensures the ep=8 job actually spans 2 nodes.
-# (Without it, SLURM might fit 8 GPUs on 2 nodes even with 1-node jobs if using
-# --gres; with the explicit --nodes flag this is guaranteed.)
+# Grand total: 42 benchmark conditions
 
 study_name: deepep-ht-multinode-qwen3
 all2all_backend: deepep_high_throughput
@@ -78,10 +67,9 @@ routing_modes:
 tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
 
 parallel_points:
-  - {tp: 1, ep: 1}    # 1 GPU, 1 node — pure compute baseline
-  - {tp: 1, ep: 4}    # 4 GPUs, 1 node — intra-node NVLink (same as Study B)
-  - {tp: 1, ep: 8}    # 8 GPUs, 2 nodes — crosses IB fabric for the first time
-  - {tp: 1, ep: 16}   # 16 GPUs, 4 nodes — full IB scaling study
+  - {tp: 1, ep: 1}    # 1 GPU, 1 node — pure compute baseline (no dispatch)
+  - {tp: 1, ep: 8}    # 8 GPUs, 1 full node — NVLink only (rdma_rank=0 for all)
+  - {tp: 1, ep: 16}   # 16 GPUs, 2 nodes × 8 GPUs — first IB hop (rdma_rank 0 vs 1)
 
 transport_conditions:
   - nvlink_default
@@ -93,23 +81,16 @@ slurm:
   qos: coc-ice
   time: 04:00:00
   cpus_per_task: 8
-  gpus_per_node: 4
+  gpus_per_node: 8
   gpu_type: h200
   use_gres: true
-  mem: 64G
-  # min_nodes=2 ensures ep=8 and ep=16 jobs span multiple physical nodes.
-  # For ep=1 and ep=4, the submit script computes ceil(world_size/4)=1, so
-  # min_nodes is effectively irrelevant for those two points.
-  min_nodes: 2
+  mem: 128G
+  # No min_nodes needed: ep=16 naturally requires ceil(16/8)=2 nodes.
+  # ep=8 fits on 1 full node (8/8=1). ep=1 also 1 node. No forcing needed.
+  min_nodes: 1
   modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
   workdir: /home/hice1/sghose7/moe-breakdown
   uv_env_dir: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv
   deepep_wheel: /storage/ice1/0/2/sghose7/deepep-build/workspace/dist/deep_ep-2.0.0+d4f41e4-cp311-cp311-linux_x86_64.whl
   extra_sbatch_args:
     - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"
-    # NOTE: The H200 IB nodes must support NCCL IB transport. If the cluster has
-    # separate IB and NVLink network fabrics, verify that the h200 nodes have IB
-    # connectivity (check: ibv_devinfo on compute node). If IB is unavailable,
-    # NCCL will fall back to TCP, which will be much slower.
-    # For H200 SXM5 on PACE ICE, IB connectivity should be available (SXM5 uses
-    # the same NVLink + IB fabric as H100). Verify before submitting ep8/ep16.

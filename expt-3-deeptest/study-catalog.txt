@@ -1,6 +1,6 @@
 ================================================================================
 EXPT-3-DEEPTEST: DeepEP Low Latency vs High Throughput Study — Catalog
-Last updated: 2026-06-29
+Last updated: 2026-06-30
 ================================================================================
 
 OVERVIEW
@@ -119,7 +119,7 @@ Status:
 Results archived: expt-3-deeptest/all_runs.zip (7 run dirs, 89 conditions)
 
 ================================================================================
-STUDY C: deepep-ll-routing-qwen3  [PENDING SUBMISSION]
+STUDY C: deepep-ll-routing-qwen3  [COMPLETE]
 ================================================================================
 
 Config: expt-3-deeptest/configs/study.deepep-ll.routing.yaml
@@ -137,13 +137,13 @@ Transport: nvlink_default only (NVSHMEM; NCCL env vars do not apply)
 Parallel points: tp1-ep1, tp1-ep2, tp1-ep4
 Total SLURM jobs: 3 | Conditions per job: 44 | Grand total: 132
 
-Submit:
-  cd /home/hice1/sghose7/moe-breakdown
-  python expt-3-deeptest/scripts/submit_slurm_study.py \
-      --config expt-3-deeptest/configs/study.deepep-ll.routing.yaml
+Status:
+  tp1-ep1: job 5450005  COMPLETED (exit 0)
+  tp1-ep2: job 5450006  COMPLETED (exit 0)
+  tp1-ep4: job 5450007  COMPLETED (exit 0)
 
 ================================================================================
-STUDY D: deepep-ht-routing-qwen3  [PENDING SUBMISSION]
+STUDY D: deepep-ht-routing-qwen3  [COMPLETE]
 ================================================================================
 
 Config: expt-3-deeptest/configs/study.deepep-ht.routing.yaml
@@ -156,12 +156,14 @@ Transport: nvlink_default only (isolates routing effect; see Study E for transpo
 Parallel points: tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2
 Total SLURM jobs: 4 | Conditions per job: 56 | Grand total: 224
 
-Submit:
-  python expt-3-deeptest/scripts/submit_slurm_study.py \
-      --config expt-3-deeptest/configs/study.deepep-ht.routing.yaml
+Status:
+  tp1-ep1: job 5450008  COMPLETED (exit 0)
+  tp1-ep2: job 5450009  COMPLETED (exit 0)
+  tp1-ep4: job 5450010  COMPLETED (exit 0)
+  tp2-ep2: job 5450011  COMPLETED (exit 0)
 
 ================================================================================
-STUDY E: deepep-ht-routing-transport-qwen3  [PENDING SUBMISSION]
+STUDY E: deepep-ht-routing-transport-qwen3  [COMPLETE]
 ================================================================================
 
 Config: expt-3-deeptest/configs/study.deepep-ht.routing.transport.yaml
@@ -183,12 +185,18 @@ dispatch (NVSHMEM-based). Transport conditions only affect TP allreduce collecti
 (tp>1), which LL does not support. Study E is therefore HT-only. For LL bandwidth
 sensitivity, a multi-node IB study would be needed (future work).
 
-Submit:
-  python expt-3-deeptest/scripts/submit_slurm_study.py \
-      --config expt-3-deeptest/configs/study.deepep-ht.routing.transport.yaml
+Status:
+  nvlink_default tp1-ep1: job 5450012  COMPLETED (exit 0)
+  nvlink_default tp1-ep2: job 5450013  COMPLETED (exit 0)
+  nvlink_default tp1-ep4: job 5450014  COMPLETED (exit 0)
+  nvlink_default tp2-ep2: job 5450015  COMPLETED (exit 0)
+  no_nvls_no_p2p tp1-ep1: job 5450016  COMPLETED (exit 0)
+  no_nvls_no_p2p tp1-ep2: job 5450017  COMPLETED (exit 0)
+  no_nvls_no_p2p tp1-ep4: job 5450018  COMPLETED (exit 0)
+  no_nvls_no_p2p tp2-ep2: job 5450019  COMPLETED (exit 0)
 
 ================================================================================
-STUDY F: deepep-ht-shapes-sweep  [PENDING SUBMISSION]
+STUDY F: deepep-ht-shapes-sweep  [COMPLETE]
 ================================================================================
 
 Config: expt-3-deeptest/configs/study.deepep-ht.shapes.yaml
@@ -207,12 +215,13 @@ Key comparison: dispatch volume per token scales with hidden_size × topk.
   deepseek_v3 dispatch:     7168 × 8 = 57344 elements per token (3.5× more)
   llama4_scout dispatch:    5120 × 1 = 5120 elements per token (top-1; 3× less)
 
-Submit:
-  python expt-3-deeptest/scripts/submit_slurm_study.py \
-      --config expt-3-deeptest/configs/study.deepep-ht.shapes.yaml
+Status:
+  tp1-ep1: job 5450020  COMPLETED (exit 0)
+  tp1-ep2: job 5450022  COMPLETED (exit 0)
+  tp1-ep4: job 5450023  COMPLETED (exit 0)
 
 ================================================================================
-STUDY H: deepep-ht-multinode-crossover-qwen3  [PENDING SUBMISSION]
+STUDY H: deepep-ht-multinode-crossover-qwen3  [BLOCKED — topology redesign needed]
 ================================================================================
 
 Config: expt-3-deeptest/configs/study.deepep-ht.multinode-crossover.yaml
@@ -225,23 +234,21 @@ Transport:
   no_ib          : TCP/IP fallback — NCCL_IB_DISABLE=1 (congested/absent fabric)
   no_ib_4ch      : TCP with 4 channels — bandwidth floor for inter-node path
 
-Parallel points and GPU placement (2 nodes × up to 4 GPUs/node):
-  tp1-ep1  : 1 GPU total (control — no dispatch, 2-node alloc but 1 task)
-  tp1-ep2  : 1 GPU per node → every dispatch token crosses the IB fabric
-  tp2-ep2  : 2 GPUs per node → TP allreduce on NVLink, EP dispatch on IB  ← most realistic
-  tp1-ep4  : 2 GPUs per node → 4-way EP, all inter-node
-Total SLURM jobs: 12 | Conditions per job: 56 | Grand total: 672
+BLOCKED: DeepEP hardcodes LEGACY_NUM_MAX_NVL_PEERS=8. Multi-node only works when
+each physical node contributes EXACTLY 8 GPUs (8 ranks per NVLink domain). With
+4 GPUs/node, ep=2 and ep=4 forced multi-node are treated as single-node by DeepEP
+→ cross-node CUDA IPC attempted → cudaErrorInvalidValue.
+WORKAROUND: Use gpus_per_node=8 (if PACE ICE H200 nodes have 8 GPUs) and
+redesign parallel_points for ep=16 on 2 nodes × 8 GPUs/node.
 
-Key comparison with single-node (Studies B/D/E):
-  Study B/D tp1-ep2 (1 node) vs Study H tp1-ep2 (2 nodes): SAME EP, different fabric
-  Study B/D tp2-ep2 (1 node) vs Study H tp2-ep2 (2 nodes): production-realistic TP+EP
-
-Submit:
-  python expt-3-deeptest/scripts/submit_slurm_study.py \
-      --config expt-3-deeptest/configs/study.deepep-ht.multinode-crossover.yaml
+Status (current design):
+  ep=1 jobs (single GPU, no-dispatch control): 5450028 (nvlink), 5450032 (no_ib), 5450036 (no_ib_4ch)  COMPLETED
+  ep=2 jobs: 5450029, 5450033, 5450037  FAILED (IPC cross-node, topology mismatch)
+  tp2-ep2 jobs: 5450030, 5450031, 5450034, 5450035, 5450039, 5450040  PENDING (will fail same reason)
+  → Pending jobs cancelled after topology diagnosis.
 
 ================================================================================
-STUDY G: deepep-ht-multinode-qwen3  [PENDING SUBMISSION]
+STUDY G: deepep-ht-multinode-qwen3  [BLOCKED — topology redesign needed]
 ================================================================================
 
 Config: expt-3-deeptest/configs/study.deepep-ht.multinode.yaml
@@ -249,22 +256,22 @@ Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ht-multinode-qwen3/
 
 Backend: deepep_high_throughput | Routing: uniform | Transport: nvlink_default
 Shape: qwen3_30b_a3b_moe
-Parallel points:
-  tp1-ep1  : 1 GPU  (1 node)  — pure compute baseline
-  tp1-ep4  : 4 GPUs (1 node)  — intra-node NVLink (matches Study B)
-  tp1-ep8  : 8 GPUs (2 nodes) — FIRST inter-node hop; crosses IB fabric
-  tp1-ep16 : 16 GPUs (4 nodes) — maximum scale; IB saturation expected at large tokens
-Tokens: full 14-value sweep
-Total SLURM jobs: 4 | Conditions per job: 14 | Grand total: 56
+Parallel points (CURRENT, broken):
+  tp1-ep1  : 1 GPU  (1 node)  — pure compute baseline  ← WORKS
+  tp1-ep4  : 4 GPUs (1 node)  — intra-node NVLink ← FAILS: vLLM passes num_rdma_bytes>0 cross-node
+  tp1-ep8  : 8 GPUs (2 nodes) — FAILS same topology mismatch (all 8 ranks in rdma_domain=0)
+  tp1-ep16 : 16 GPUs (4 nodes) — FAILS same (ranks 0-7 span 2 nodes in rdma_domain=0)
 
-IMPORTANT: Verify IB connectivity on H200 nodes before submitting ep8/ep16 jobs:
-  srun --nodes=2 --ntasks=2 --gres=gpu:h200:4 ibv_devinfo | head -5
-HT uses NCCL — IB is handled automatically. No NVSHMEM stubs needed.
-LL multi-node (future): requires NVSHMEM IB transport → remove stubs from venv first.
+BLOCKED: Same DeepEP LEGACY_NUM_MAX_NVL_PEERS=8 issue as Study H.
+Multi-node only works for ep=16 on 2 nodes × 8 GPUs/node (where rdma_domain 0 = node 0,
+rdma_domain 1 = node 1).
+WORKAROUND: Use gpus_per_node=8, min_nodes=2, ep=16 on 2 nodes.
 
-Submit:
-  python expt-3-deeptest/scripts/submit_slurm_study.py \
-      --config expt-3-deeptest/configs/study.deepep-ht.multinode.yaml
+Status (current design):
+  tp1-ep1: job 5450024  COMPLETED (exit 0)  ← single GPU control, valid
+  tp1-ep4: job 5450025  FAILED (buffer.hpp:116 assertion: num_ranks>NVL_MAX_PEERS or LL mode)
+  tp1-ep8: job 5450026  PENDING → will fail same reason, to be cancelled
+  tp1-ep16: job 5450027  PENDING → will fail same reason, to be cancelled
 
 ================================================================================
 ANALYSIS GUIDE — TIME BUDGET DECOMPOSITION
@@ -348,6 +355,23 @@ DeepEP LL mode token limit (discovered on first ep>1 run, 2026-06-29):
     Limit: max_tokens < 16384 (128 * 16384 * 4160 * 4 / 16 = 2,181,038,080 > INT_MAX)
     Safe max: 8192 (ratio = 1,090,519,040 < INT_MAX)
   Studies A/C token range capped accordingly. HT mode is unaffected.
+
+DeepEP multi-node topology constraint (discovered 2026-06-30):
+  LEGACY_NUM_MAX_NVL_PEERS=8 is hardcoded in buffer.hpp. This partitions ranks into
+  NVLink domains: rdma_rank = rank/8. All ranks in the same NVL domain use CUDA IPC
+  (cudaIpcOpenMemHandle). Cross-domain communication uses NVSHMEM.
+  CONSEQUENCE: multi-node works ONLY when each physical node has exactly 8 GPUs.
+  With 4 GPUs/node and ep=4 on 2 nodes: all 4 ranks have rdma_rank=0 → all in one
+  NVL domain → IPC attempted cross-node → cudaErrorInvalidValue.
+  MINIMUM VIABLE: ep=16 on 2 nodes × 8 GPUs/node (rdma_domain 0 = node 0,
+  rdma_domain 1 = node 1, IPC within node ✓, NVSHMEM/NCCL between nodes ✓).
+  For LL multi-node: needs ibgda restored (done 2026-06-30) AND 8 GPUs/node topology.
+
+NVSHMEM ibgda transport restoration (2026-06-30):
+  ibgda stub removed: /home/hice1/sghose7/nvshmem-stubs/nvshmem_transport_ibgda.so.3 deleted.
+  Real ibgda restored: cp .../nvshmem_transport_ibgda.so.3.orig .../nvshmem_transport_ibgda.so.3
+  gdrdrv and nvidia_peermem confirmed loaded on compute nodes (atl1-1-03-017-9-0).
+  ibrc and ibdevx remain stubbed (crash with exit 139).
 
 NVSHMEM IB transport fix (revised 2026-06-29):
   NVSHMEM 3.3.24 has no env var to disable transport plugins — it loads all
