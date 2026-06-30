@@ -5,6 +5,7 @@ import math
 import os
 import statistics
 import subprocess
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -120,6 +121,114 @@ def collect_hardware_snapshot() -> dict[str, Any]:
         except Exception as exc:
             out[name] = f"UNAVAILABLE: {exc}"
     return out
+
+
+class GpuUtilSampler:
+    """Samples GPU SM utilization, memory-BW utilization, and memory usage via nvidia-smi.
+
+    Runs in a background daemon thread. Call start() before the measured region and
+    stop() after synchronization. summary() returns mean/max across all samples.
+    If nvidia-smi is unavailable the sampler silently collects nothing.
+    """
+
+    def __init__(self, device_index: int, interval_ms: float = 250.0) -> None:
+        self._device_index = device_index
+        self._interval_s = interval_ms / 1000.0
+        self._samples: list[dict[str, float]] = []
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._samples.clear()
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="GpuUtilSampler")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                result = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        f"--id={self._device_index}",
+                        "--query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                )
+                if result.returncode == 0:
+                    line = result.stdout.strip()
+                    if line:
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) >= 4:
+                            self._samples.append({
+                                "gpu_util_pct": float(parts[0]),
+                                "gpu_mem_bw_util_pct": float(parts[1]),
+                                "gpu_mem_used_mib": float(parts[2]),
+                                "gpu_mem_total_mib": float(parts[3]),
+                            })
+            except Exception:
+                pass
+            self._stop_event.wait(self._interval_s)
+
+    def summary(self) -> dict[str, float]:
+        if not self._samples:
+            return {
+                "gpu_util_pct_mean": float("nan"),
+                "gpu_util_pct_max": float("nan"),
+                "gpu_mem_bw_util_pct_mean": float("nan"),
+                "gpu_mem_bw_util_pct_max": float("nan"),
+                "gpu_mem_used_gib_mean": float("nan"),
+                "num_util_samples": 0,
+            }
+        gpu_u = [s["gpu_util_pct"] for s in self._samples]
+        mem_bw = [s["gpu_mem_bw_util_pct"] for s in self._samples]
+        mem_used = [s["gpu_mem_used_mib"] for s in self._samples]
+        return {
+            "gpu_util_pct_mean": float(statistics.mean(gpu_u)),
+            "gpu_util_pct_max": float(max(gpu_u)),
+            "gpu_mem_bw_util_pct_mean": float(statistics.mean(mem_bw)),
+            "gpu_mem_bw_util_pct_max": float(max(mem_bw)),
+            "gpu_mem_used_gib_mean": float(statistics.mean(mem_used)) / 1024.0,
+            "num_util_samples": len(self._samples),
+        }
+
+
+def collect_host_resource_snapshot() -> dict[str, float]:
+    """CPU load and host memory from /proc. Works on Linux; returns NaN elsewhere."""
+    result: dict[str, float] = {}
+    try:
+        load1, _, _ = os.getloadavg()
+        cpu_count = os.cpu_count() or 1
+        result["cpu_load1_norm"] = float(load1) / float(cpu_count)
+    except (AttributeError, OSError):
+        result["cpu_load1_norm"] = float("nan")
+    try:
+        meminfo_text = Path("/proc/meminfo").read_text()
+        memtotal_kb = memavail_kb = 0
+        for line in meminfo_text.splitlines():
+            if line.startswith("MemTotal:"):
+                memtotal_kb = int(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                memavail_kb = int(line.split()[1])
+        if memtotal_kb > 0:
+            result["host_mem_used_gb"] = float(memtotal_kb - memavail_kb) / (1024.0 ** 2)
+            result["host_mem_util_pct"] = (1.0 - float(memavail_kb) / float(memtotal_kb)) * 100.0
+        else:
+            result["host_mem_used_gb"] = float("nan")
+            result["host_mem_util_pct"] = float("nan")
+    except Exception:
+        result["host_mem_used_gb"] = float("nan")
+        result["host_mem_util_pct"] = float("nan")
+    return result
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -400,6 +509,12 @@ def run_condition(
     torch.cuda.synchronize()
     dist.barrier()
 
+    # Start GPU utilization sampling just before the measurement window.
+    # Each rank samples its own device. We gather and report max-across-ranks
+    # consistent with the latency aggregation methodology.
+    util_sampler = GpuUtilSampler(device_index=torch.cuda.current_device(), interval_ms=250.0)
+    util_sampler.start()
+
     # Deferred-sync timing: record all events without syncing inside the loop,
     # then synchronize once after all reps. This keeps the CPU-GPU sync out of
     # the hot path so each elapsed_time() reflects only kernel execution time.
@@ -423,6 +538,7 @@ def run_condition(
             event_pairs.append((start_event, end_event))
 
     torch.cuda.synchronize()
+    util_sampler.stop()
     timings_ms = [float(s.elapsed_time(e)) for s, e in event_pairs]
 
     torch.cuda.synchronize()
@@ -448,6 +564,7 @@ def run_condition(
         "tp_rank": tp_rank,
         "timings_ms": timings_ms,
         **local_summary,
+        "util": util_sampler.summary(),
     }
 
     gathered: list[dict[str, Any] | None] = [None for _ in range(env.world_size)]
@@ -466,6 +583,30 @@ def run_condition(
     ]
     rank_p99s = [float(item.get("p99_ms", float("nan"))) for item in per_rank]
     rank_std_from_summary = [float(item.get("std_ms", 0.0)) for item in per_rank]
+
+    # Aggregate GPU utilization across ranks: max-across-ranks (worst-case GPU)
+    # and mean-across-ranks (average system load).
+    def _max_util_field(field: str) -> float:
+        vals = [float(item["util"].get(field, float("nan"))) for item in per_rank]
+        finite = [v for v in vals if not math.isnan(v)]
+        return float(max(finite)) if finite else float("nan")
+
+    def _mean_util_field(field: str) -> float:
+        vals = [float(item["util"].get(field, float("nan"))) for item in per_rank]
+        finite = [v for v in vals if not math.isnan(v)]
+        return float(statistics.mean(finite)) if finite else float("nan")
+
+    util_agg = {
+        "gpu_util_pct_mean_maxrank": _max_util_field("gpu_util_pct_mean"),
+        "gpu_util_pct_max_maxrank": _max_util_field("gpu_util_pct_max"),
+        "gpu_util_pct_mean_meanrank": _mean_util_field("gpu_util_pct_mean"),
+        "gpu_mem_bw_util_pct_mean_maxrank": _max_util_field("gpu_mem_bw_util_pct_mean"),
+        "gpu_mem_bw_util_pct_max_maxrank": _max_util_field("gpu_mem_bw_util_pct_max"),
+        "gpu_mem_bw_util_pct_mean_meanrank": _mean_util_field("gpu_mem_bw_util_pct_mean"),
+        "gpu_mem_used_gib_mean_maxrank": _max_util_field("gpu_mem_used_gib_mean"),
+        "num_util_samples": max((int(item["util"].get("num_util_samples", 0)) for item in per_rank), default=0),
+    }
+    host_stats = collect_host_resource_snapshot()
 
     summary = {
         "study_name": cfg.study_name,
@@ -499,6 +640,8 @@ def run_condition(
         "per_rank": per_rank,
         "routing_counts": routing.stats.counts,
         "routing_probabilities": routing.stats.probabilities,
+        **util_agg,
+        **host_stats,
     }
 
     if cond.routing_mode != "alpha":

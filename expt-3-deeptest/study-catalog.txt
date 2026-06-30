@@ -43,14 +43,31 @@ Warmup: 30 iters | Measure: 100 iters | Seed: 42
 STUDY INDEX
 ================================================================================
 
-  Label  Config                                      Backend  Routing        Transport       Jobs  Conditions
-  -----  ------------------------------------------  -------  -------------  --------------  ----  ----------
-  A      study.deepep-ll.qwen3.yaml                  LL       uniform only   nvlink_default     3          33
-  B      study.deepep-ht.qwen3.yaml                  HT       uniform only   nvlink_default     4          56
-  C      study.deepep-ll.routing.yaml                LL       4 modes        nvlink_default     3         132
-  D      study.deepep-ht.routing.yaml                HT       4 modes        nvlink_default     4         224
-  E      study.deepep-ht.routing.transport.yaml      HT       4 modes        2 transports       8         448
-                                                                                        Total:  22         893
+  Label  Config                                      Backend  Routing        Transport       Nodes  Jobs  Conditions
+  -----  ------------------------------------------  -------  -------------  --------------  -----  ----  ----------
+  A      study.deepep-ll.qwen3.yaml                  LL       uniform only   nvlink_default      1     3          33
+  B      study.deepep-ht.qwen3.yaml                  HT       uniform only   nvlink_default      1     4          56
+  C      study.deepep-ll.routing.yaml                LL       4 modes        nvlink_default      1     3         132
+  D      study.deepep-ht.routing.yaml                HT       4 modes        nvlink_default      1     4         224
+  E      study.deepep-ht.routing.transport.yaml      HT       4 modes        2 transports        1     8         448
+  F      study.deepep-ht.shapes.yaml                 HT       uniform        nvlink_default      1     3         126
+  G      study.deepep-ht.multinode.yaml              HT       uniform        nvlink_default     1-4    4          56
+                                                                                           Total:  29        1075
+
+Utilization columns (added to all new runs via GpuUtilSampler in runner.py):
+  gpu_util_pct_mean_maxrank    : mean SM utilization % during measure_iters (worst rank)
+  gpu_util_pct_max_maxrank     : peak SM utilization % during measure_iters (worst rank)
+  gpu_util_pct_mean_meanrank   : mean SM utilization % averaged across all ranks
+  gpu_mem_bw_util_pct_mean_maxrank : mean GPU memory-BW utilization % (worst rank)
+  gpu_mem_bw_util_pct_max_maxrank  : peak GPU memory-BW utilization % (worst rank)
+  gpu_mem_bw_util_pct_mean_meanrank: mean GPU memory-BW util % (all ranks)
+  gpu_mem_used_gib_mean_maxrank: mean GPU VRAM used in GiB (worst rank)
+  num_util_samples             : number of nvidia-smi samples collected during run
+  cpu_load1_norm               : 1-min CPU load average / cpu_count (rank 0 node)
+  host_mem_used_gb             : host RAM used in GB (rank 0 node)
+  host_mem_util_pct            : host RAM utilization % (rank 0 node)
+Sampling: background daemon thread at 250ms intervals; silently no-ops if nvidia-smi unavailable.
+NOTE: Studies A/B used the old runner without utilization columns; re-run to get them.
 
 ================================================================================
 STUDY A: deepep-ll-qwen3  [COMPLETE]
@@ -170,6 +187,56 @@ Submit:
       --config expt-3-deeptest/configs/study.deepep-ht.routing.transport.yaml
 
 ================================================================================
+STUDY F: deepep-ht-shapes-sweep  [PENDING SUBMISSION]
+================================================================================
+
+Config: expt-3-deeptest/configs/study.deepep-ht.shapes.yaml
+Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ht-shapes-sweep/
+
+Backend: deepep_high_throughput | Routing: uniform | Transport: nvlink_default
+Shapes (3):
+  qwen3_30b_a3b_moe : hidden=2048, inter=768,  E=128, topk=8  (current baseline)
+  deepseek_v3_moe   : hidden=7168, inter=2048, E=256, topk=8  (3.5× larger hidden; 2× more experts)
+  llama4_scout_moe  : hidden=5120, inter=8192, E=16,  topk=1  (few large experts; top-1 routing)
+Tokens: full 14-value sweep | Parallel: tp1-ep1, tp1-ep2, tp1-ep4
+Total SLURM jobs: 3 | Conditions per job: 42 | Grand total: 126
+
+Key comparison: dispatch volume per token scales with hidden_size × topk.
+  qwen3 per-token dispatch: 2048 × 8 = 16384 elements per token
+  deepseek_v3 dispatch:     7168 × 8 = 57344 elements per token (3.5× more)
+  llama4_scout dispatch:    5120 × 1 = 5120 elements per token (top-1; 3× less)
+
+Submit:
+  python expt-3-deeptest/scripts/submit_slurm_study.py \
+      --config expt-3-deeptest/configs/study.deepep-ht.shapes.yaml
+
+================================================================================
+STUDY G: deepep-ht-multinode-qwen3  [PENDING SUBMISSION]
+================================================================================
+
+Config: expt-3-deeptest/configs/study.deepep-ht.multinode.yaml
+Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ht-multinode-qwen3/
+
+Backend: deepep_high_throughput | Routing: uniform | Transport: nvlink_default
+Shape: qwen3_30b_a3b_moe
+Parallel points:
+  tp1-ep1  : 1 GPU  (1 node)  — pure compute baseline
+  tp1-ep4  : 4 GPUs (1 node)  — intra-node NVLink (matches Study B)
+  tp1-ep8  : 8 GPUs (2 nodes) — FIRST inter-node hop; crosses IB fabric
+  tp1-ep16 : 16 GPUs (4 nodes) — maximum scale; IB saturation expected at large tokens
+Tokens: full 14-value sweep
+Total SLURM jobs: 4 | Conditions per job: 14 | Grand total: 56
+
+IMPORTANT: Verify IB connectivity on H200 nodes before submitting ep8/ep16 jobs:
+  srun --nodes=2 --ntasks=2 --gres=gpu:h200:4 ibv_devinfo | head -5
+HT uses NCCL — IB is handled automatically. No NVSHMEM stubs needed.
+LL multi-node (future): requires NVSHMEM IB transport → remove stubs from venv first.
+
+Submit:
+  python expt-3-deeptest/scripts/submit_slurm_study.py \
+      --config expt-3-deeptest/configs/study.deepep-ht.multinode.yaml
+
+================================================================================
 ANALYSIS GUIDE — TIME BUDGET DECOMPOSITION
 ================================================================================
 
@@ -207,36 +274,37 @@ Key comparisons enabled by the full study suite:
 ROADMAP — FUTURE EXTENSIONS
 ================================================================================
 
-These are not yet implemented but represent the full study vision:
+IMPLEMENTED (as of 2026-06-29):
+  [x] Routing sweep (Studies C/D/E): uniform, zipfian, skewed-2x, skewed-4x
+  [x] Bandwidth congestion (Study E): routing × [nvlink_default, no_nvls_no_p2p]
+  [x] Additional shapes (Study F): DeepSeek-V3, Llama-4 Scout, Qwen3 comparison
+  [x] Multi-node HT (Study G): ep8, ep16 (2 and 4 nodes)
+  [x] Resource utilization (runner.py): GPU SM%, memory-BW%, RAM, CPU load
+      via GpuUtilSampler background thread at 250ms intervals → results.csv columns
 
-MULTI-NODE STUDY (requires 2+ nodes on PACE ICE or another multi-node cluster)
-  - EP8 (2 nodes × 4 GPUs), EP16 (4 nodes × 4 GPUs) — inter-node IB RDMA
-  - LL is designed for this regime (IB RDMA dispatch); expected to be competitive
-  - Transport conditions: IB full-speed vs throttled BW (if cluster supports)
-  - Config change: slurm.min_nodes > 1, larger parallel_points
-  - NVSHMEM stubs: IB stubs must be REMOVED for multi-node (need real IB transport)
-  - Estimated: 2-3 new configs, ~8-16 jobs each
+STILL PENDING:
 
-ADDITIONAL MODEL SHAPES
-  - DeepSeek-V3 style: hidden=7168, inter=2048, E=256, topk=8 (larger, more experts)
-  - Mixtral style: hidden=4096, inter=14336, E=8, topk=2 (fewer, larger experts)
-  - Comparing shapes shows how E (number of experts) and hidden_size interact with
-    LL buffer limits, HT collective volume, and routing imbalance sensitivity
-
-RESOURCE UTILIZATION INSTRUMENTATION
-  Currently missing: GPU SM utilization %, DRAM bandwidth %, achieved NVSHMEM BW
-  To add:
-    - pynvml sampling thread during benchmark iterations (GPU util, memory BW)
-    - torch.cuda.memory_stats() after each warmup/measure phase
-    - For NVSHMEM: NVSHMEM_DEBUG=INFO logs bytes-per-rank per call; could parse
-    - Add to reporting.py / runner.py as optional --profile-utilization flag
-  These would strengthen the "network starves GPU" narrative with direct evidence
-  (low SM utilization during dispatch, high network_fraction under skewed routing)
+LL MULTI-NODE
+  LL uses NVSHMEM IB transport, currently disabled via stubs in the deepep venv.
+  To enable: restore original .so.3 files from .so.3.orig backups in venv.
+  After restore: test with a small ep=2 multi-node LL job first.
+  Risk: IBRC/IBDEVX/IBGDA may still crash on PACE ICE — verify IB verb permissions.
 
 IB TRANSPORT CONDITIONS (multi-node only)
-  - NVSHMEM IB bandwidth throttling (if supported via ib_set_port_rate or tc qdisc)
-  - NCCL IB channel count degradation (analogous to NCCL_MAX_NCHANNELS for InfiniBand)
-  - Shows whether LL or HT is more sensitive to IB bandwidth reduction
+  - NCCL IB channel count: NCCL_MAX_NCHANNELS applies to IB as well
+  - Shows whether latency scaling from ep4→ep8→ep16 is bandwidth-bound or latency-bound
+  - Add transport_conditions to Study G: [nvlink_default, no_nvls_no_p2p_4ch, no_nvls_no_p2p_1ch]
+    (These degrade IB bandwidth via channel count, not link speed)
+
+NVSHMEM DISPATCH TIMING FOR LL
+  Currently: network_ms=0 for all LL runs (NVSHMEM not captured by NCCL events)
+  To fix: wrap NVSHMEM dispatch calls in manual CUDA events in moe_kernel.py
+  Needed for: LL time-budget decomposition (dispatch vs compute fraction)
+
+ROUTING SWEEP × MULTI-NODE (Study H)
+  Combine routing_modes with the multi-node parallel points to show that routing
+  imbalance amplifies IB bottlenecks at multi-node scale.
+  Config: routing_modes × [uniform, zipfian, skewed-2x, skewed-4x] × [ep4, ep8, ep16]
 
 ================================================================================
 ENGINEERING NOTES

@@ -1,0 +1,120 @@
+# expt-3-deeptest: DeepEP High Throughput — Shape Sweep (Study F)
+#
+# Compares three MoE architectures with fundamentally different shapes to show
+# that the network sensitivity of DeepEP HT varies with model architecture.
+# Fixed routing (uniform) and transport (nvlink_default) to isolate shape effect.
+#
+# Research questions:
+#   Does a model with more, smaller experts (DeepSeek-V3 style) communicate more
+#   data per token than one with fewer, larger experts (Mixtral style)?
+#   How does the compute-to-network ratio shift with expert size and count?
+#
+# Shapes:
+#   qwen3_30b_a3b_moe:  hidden=2048, inter=768,   E=128, topk=8  (baseline)
+#     — decode-oriented MoE; many small experts; high expert parallelism potential
+#   deepseek_v3_moe:    hidden=7168, inter=2048,  E=256, topk=8  (larger, more experts)
+#     — "extreme MoE": very large hidden, many experts; higher dispatch volume per token
+#   llama4_scout_moe:   hidden=5120, inter=8192,  E=16,  topk=1  (few large experts)
+#     — dense-expert regime; top-1 routing means no token duplication in dispatch
+#
+# Token range: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+# Transport: nvlink_default only
+# Parallel points: tp1-ep1, tp1-ep2, tp1-ep4
+#   NOTE: tp2-ep2 excluded — llama4_scout_moe has E=16, ep=2 gives 8 experts/GPU,
+#   then tp=2 would give 4. Works arithmetically but cross-shape tp2-ep2 comparison
+#   is less clean; add if needed.
+#
+# Memory requirements per GPU at ep=4, tp=1, bf16:
+#   qwen3_30b_a3b_moe:  32 experts × (1536×2048 + 2048×768)×2B  ≈ 0.28 GB
+#   deepseek_v3_moe:    64 experts × (4096×7168 + 7168×2048)×2B ≈ 5.4 GB
+#   llama4_scout_moe:    4 experts × (16384×5120 + 5120×8192)×2B ≈ 0.96 GB
+#   All fit comfortably on H200 (141 GB HBM).
+#
+# SLURM jobs: 3 parallel points × 1 transport = 3
+# Conditions per job: 3 shapes × 14 tokens = 42
+# Grand total: 126 benchmark conditions
+
+study_name: deepep-ht-shapes-sweep
+all2all_backend: deepep_high_throughput
+output_root: ~/scratch/moe-breakdown-runs/expt-3-deeptest
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 42
+warmup_iters: 30
+measure_iters: 100
+collect_buckets: true
+bucket_profile_iters: 5
+bucket_full_events: true
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 512
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: qwen3_30b_a3b_moe
+    hidden_size: 2048
+    intermediate_size: 768
+    num_experts: 128
+    topk: 8
+    dtype: bfloat16
+
+  - name: deepseek_v3_moe
+    hidden_size: 7168
+    intermediate_size: 2048
+    num_experts: 256
+    topk: 8
+    dtype: bfloat16
+    # DeepSeek-V3 layer config: extreme MoE — many small experts.
+    # With E=256 and ep=4: 64 experts/GPU. Dispatch volume per token is
+    # proportional to hidden_size (7168 vs 2048 for Qwen3) — 3.5× more bytes/token.
+    # Expect higher network sensitivity than Qwen3.
+
+  - name: llama4_scout_moe
+    hidden_size: 5120
+    intermediate_size: 8192
+    num_experts: 16
+    topk: 1
+    dtype: bfloat16
+    # Llama-4 Scout MoE layer: few large experts, top-1 routing.
+    # top-1 means each token goes to exactly one expert — no duplication.
+    # With E=16 and ep=4: 4 experts/GPU. High compute per token (large inter),
+    # but lower dispatch volume per token than topk=8 models.
+
+routing_modes:
+  - uniform
+
+tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+
+parallel_points:
+  - {tp: 1, ep: 1}   # control: no dispatch, all shapes identical except compute
+  - {tp: 1, ep: 2}   # onset of expert dispatch
+  - {tp: 1, ep: 4}   # maximum EP on 4-GPU node
+
+transport_conditions:
+  - nvlink_default
+
+alphas: [1.0]
+
+slurm:
+  partition: ice-gpu
+  qos: coc-ice
+  time: 04:00:00
+  cpus_per_task: 8
+  gpus_per_node: 4
+  gpu_type: h200
+  use_gres: true
+  mem: 64G
+  modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
+  workdir: /home/hice1/sghose7/moe-breakdown
+  uv_env_dir: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv
+  deepep_wheel: /storage/ice1/0/2/sghose7/deepep-build/workspace/dist/deep_ep-2.0.0+d4f41e4-cp311-cp311-linux_x86_64.whl
+  extra_sbatch_args:
+    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"
