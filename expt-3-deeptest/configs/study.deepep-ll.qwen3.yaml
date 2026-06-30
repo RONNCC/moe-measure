@@ -62,7 +62,9 @@ parallel_points:
   - {tp: 1, ep: 1}   # control: no inter-GPU dispatch (LL==HT here)
   - {tp: 1, ep: 2}   # onset of expert dispatch
   - {tp: 1, ep: 4}   # maximum EP on 4-GPU node
-  - {tp: 2, ep: 2}   # TP+EP combined
+  # tp2-ep2 omitted: vLLM's DeepEP LL kernel asserts a1.size(0)==num_experts/ep
+  # but internally re-shards by tp, producing num_experts/(tp*ep) rows. tp>1
+  # is not supported in this vLLM build's DeepEP LL path.
 
 # Single transport condition: baseline NVLink. DeepEP uses its own NVSHMEM transport
 # for expert dispatch; NCCL only handles TP collectives (when tp>1).

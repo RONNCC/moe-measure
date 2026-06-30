@@ -45,10 +45,14 @@ Tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192]
   (num_rdma_bytes / sizeof(int4) < INT_MAX) in buffer.hpp:112.
   8192 is the largest safe power-of-2 for this shape.
 Transport condition: nvlink_default (no NCCL degradation)
-Parallel points: tp1-ep1, tp1-ep2, tp1-ep4, tp2-ep2
-Total SLURM jobs: 4
+Parallel points: tp1-ep1, tp1-ep2, tp1-ep4
+  NOTE: tp2-ep2 dropped. vLLM's DeepEP LL modular_kernel asserts
+  a1.size(0)==num_experts/ep but internally re-shards by tp, yielding
+  num_experts/(tp*ep) rows → assertion fails. tp>1 unsupported in this
+  vLLM build's DeepEP LL path. HT is unaffected (different kernel path).
+Total SLURM jobs: 3
 Conditions per job: 11
-Grand total: 44 benchmark conditions
+Grand total: 33 benchmark conditions
 
 ================================================================================
 STUDY B: deepep-ht-qwen3
@@ -69,9 +73,9 @@ Grand total: 56 benchmark conditions
 COMBINED TOTALS
 ================================================================================
 
-  Study A: 4 jobs | 44 conditions  (LL: tokens capped at 8192)
+  Study A: 3 jobs | 33 conditions  (LL: tokens capped at 8192; tp2-ep2 dropped)
   Study B: 4 jobs | 56 conditions  (HT: full 14-token range)
-  Total:   8 jobs | 100 benchmark conditions
+  Total:   7 jobs | 89 benchmark conditions
 
 Submit:
   cd /home/hice1/sghose7/moe-breakdown
@@ -116,10 +120,10 @@ NVSHMEM IB transport fix (revised 2026-06-29):
 
 NVSHMEM_QP_DEPTH assertion:
   deepep low_latency_dispatch asserts:
-    nvshmem_qp_depth >= (tokens_dispatched_to_rank + 1) * 2
-  Default qp_depth = 1024, which covers only ≤511 tokens/rank.
-  With 65536 tokens and ep=4, worst case = 65536/4 = 16384 tokens/rank.
-  Fix: NVSHMEM_QP_DEPTH=16384 (set in sbatch).
+    nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
+  num_max_dispatch_tokens_per_rank is derived from the buffer's max_tokens, not
+  the actual batch size. With max_tokens=8192: need (8192+1)*2 = 16386.
+  NVSHMEM_QP_DEPTH=16384 fails by 2. Fix: NVSHMEM_QP_DEPTH=32768 (set in sbatch).
 
 DeepEP wheel:
   Built 2026-06-24 with CUDA 13.0.1 + NVSHMEM 3.3.24.
@@ -137,13 +141,37 @@ CUDA module:
 
 Prior NVSHMEM blocker (expt1, H100):
   expt1 limited DeepEP to tp1-ep1 only due to NVSHMEM IBRC failures.
-  With the IBRC/IBGDA disable fix and H200 NVLink, ep>1 should now work.
-  First time ep>1 DeepEP has been attempted on this cluster.
+  With the IBRC/IBGDA disable fix and H200 NVLink, ep>1 now works on H200.
+  First confirmed ep>1 DeepEP run on this cluster: jobs 5449022 (tp1-ep2),
+  5449023 (tp1-ep4).
+
+NVSHMEM IB transport — in-place stub replacement (2026-06-29):
+  LD_LIBRARY_PATH prepend approach failed: libnvshmem_host.so has
+  DT_RPATH=${ORIGIN}, which takes priority over LD_LIBRARY_PATH.
+  Fix: replace the actual transport .so files in the venv at their RPATH
+  location with stubs. Originals backed up as .so.3.orig.
+  Replaced: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv/lib/
+    python3.11/site-packages/nvidia/nvshmem/lib/
+      nvshmem_transport_ibrc.so.3   → stub
+      nvshmem_transport_ibdevx.so.3 → stub
+      nvshmem_transport_ibgda.so.3  → stub
 
 ================================================================================
-CURRENT STATUS — NOT YET SUBMITTED
+CURRENT STATUS — COMPLETE (2026-06-29)
 ================================================================================
 
-No jobs submitted yet. Run submit commands above on the cluster.
+Study A (deepep-ll-qwen3) — COMPLETE:
+  tp1-ep1: job 5448990  COMPLETED (exit 0)
+  tp1-ep2: job 5449022  COMPLETED (exit 0)  ← first ep>1 LL success on H200
+  tp1-ep4: job 5449023  COMPLETED (exit 0)
+  tp2-ep2: not run (vLLM DeepEP LL does not support tp>1)
+
+Study B (deepep-ht-qwen3) — COMPLETE:
+  tp1-ep1: job 5448822  COMPLETED (exit 0)
+  tp1-ep2: job 5448823  COMPLETED (exit 0)
+  tp1-ep4: job 5448824  COMPLETED (exit 0)
+  tp2-ep2: job 5448825  COMPLETED (exit 0)
+
+Results archived: expt-3-deeptest/all_runs.zip (7 run dirs, 89 conditions)
 
 ================================================================================
