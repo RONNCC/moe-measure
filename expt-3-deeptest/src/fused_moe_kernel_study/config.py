@@ -159,6 +159,19 @@ TRANSPORT_CONDITION_ENV: dict[str, dict[str, str]] = {
         "NCCL_P2P_DISABLE": "1",
         "NCCL_MAX_NCHANNELS": "8",
     },
+    # ── multi-node IB degradation ────────────────────────────────────────────
+    # no_ib: disable InfiniBand transport entirely; NCCL falls back to TCP/IP.
+    # Simulates a congested or absent IB fabric on a multi-node job.
+    # On single-node jobs this has no effect (IB is only used cross-node).
+    "no_ib": {
+        "NCCL_IB_DISABLE": "1",
+    },
+    # no_ib_4ch: TCP fallback with reduced channel count — bandwidth floor.
+    # Analogous to no_nvls_no_p2p_4ch but for the inter-node path.
+    "no_ib_4ch": {
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_MAX_NCHANNELS": "4",
+    },
 }
 
 

@@ -52,7 +52,7 @@ def build_sbatch_command(config_path: Path, tp: int, ep: int, tc: str = "nvlink_
         f"--output={logs_dir / ('%x-%j.out')}",
         f"--error={logs_dir / ('%x-%j.err')}",
     ]
-    gpus_per_node_request = min(world_size, slurm.gpus_per_node)
+    gpus_per_node_request = math.ceil(world_size / nodes)
     if slurm.use_gres:
         if slurm.gpu_type:
             cmd.append(f"--gres=gpu:{slurm.gpu_type}:{gpus_per_node_request}")

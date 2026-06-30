@@ -1,0 +1,117 @@
+# expt-3-deeptest: DeepEP High Throughput — Multi-Node Crossover (Study H)
+#
+# The same EP degrees as the single-node studies, but forced across multiple nodes
+# so expert dispatch crosses the IB fabric. Pairing with Studies B/D/E gives a
+# clean before/after: same EP, same routing, same tokens — only the network path
+# changes (NVLink vs InfiniBand vs TCP fallback).
+#
+# Research question:
+#   How much does the IB hop cost compared to NVLink for the same EP degree?
+#   Does routing imbalance hurt more when the bottleneck is inter-node IB?
+#   Is tp=2,ep=2 (TP on NVLink, EP on IB) a good production configuration?
+#
+# Placement strategy (2 nodes, 4 GPUs/node):
+#   tp=1, ep=1  : 1 GPU total (1 node) — compute baseline, no dispatch
+#   tp=1, ep=2  : 1 GPU per node, 2 nodes — EP crosses IB immediately
+#   tp=2, ep=2  : 2 GPUs per node, 2 nodes — TP allreduce on NVLink, EP on IB
+#                 This is the standard production placement for TP+EP models.
+#   tp=1, ep=4  : 2 GPUs per node, 2 nodes — 4-way EP split across 2 nodes
+#
+# Transport conditions:
+#   nvlink_default  : IB at full speed (NCCL handles it automatically on multi-node)
+#   no_ib           : TCP fallback — simulates congested or absent IB fabric
+#   no_ib_4ch       : TCP with 4 channels — bandwidth floor for inter-node path
+#
+# With min_nodes=2, the submit script allocates:
+#   ep=1  : ceil(1/2)=1 GPU/node, 2 nodes requested but only 1 needed — SLURM may
+#           consolidate; set min_nodes in sbatch via --nodes=2 to guarantee 2 nodes.
+#           NOTE: ep=1 with forced 2-node placement is unusual — use as control only.
+#   ep=2  : ceil(2/2)=1 GPU/node, 2 nodes → 1 task per node, IB for all dispatch
+#   tp2ep2: ceil(4/2)=2 GPUs/node, 2 nodes → 2 TP ranks same node, EP across IB
+#   ep=4  : ceil(4/2)=2 GPUs/node, 2 nodes → same
+#
+# Compare to single-node (Studies B/D/E):
+#   B/D/E tp1-ep2  : 2 GPUs same node → NVLink only
+#   H     tp1-ep2  : 1 GPU per node  → IB for every dispatch token
+#   B/D/E tp2-ep2  : 4 GPUs same node → NVLink only
+#   H     tp2-ep2  : 2 nodes, 2 GPUs/node → TP on NVLink, EP on IB
+#
+# SLURM jobs: 4 parallel points × 3 transports = 12
+# Conditions per job: 4 routing_modes × 14 tokens = 56
+# Grand total: 672 benchmark conditions
+
+study_name: deepep-ht-multinode-crossover-qwen3
+all2all_backend: deepep_high_throughput
+output_root: ~/scratch/moe-breakdown-runs/expt-3-deeptest
+
+hot_expert_count: 1
+routing_weight_mode: uniform
+apply_router_weight_on_input: false
+seed: 42
+warmup_iters: 30
+measure_iters: 100
+collect_buckets: true
+bucket_profile_iters: 5
+bucket_full_events: true
+
+sweep_modes:
+  - full_factorial
+
+baseline:
+  alpha: 1.0
+  tokens: 512
+  parallel:
+    tp: 1
+    ep: 1
+
+kernel_shapes:
+  - name: qwen3_30b_a3b_moe
+    hidden_size: 2048
+    intermediate_size: 768
+    num_experts: 128
+    topk: 8
+    dtype: bfloat16
+
+routing_modes:
+  - uniform
+  - zipfian
+  - skewed-2x
+  - skewed-4x
+
+tokens: [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 16384, 32768, 65536]
+
+parallel_points:
+  - {tp: 1, ep: 1}   # control: 1 GPU, no dispatch (2-node allocation, 1 task)
+  - {tp: 1, ep: 2}   # 1 GPU per node → every dispatch token crosses IB
+  - {tp: 2, ep: 2}   # 2 GPUs per node → TP on NVLink, EP dispatch on IB
+  - {tp: 1, ep: 4}   # 2 GPUs per node → 4-way EP split across 2 nodes
+
+# nvlink_default on multi-node = IB at full speed (NCCL auto-selects IB).
+# no_ib = TCP fallback, simulating degraded/congested inter-node fabric.
+# no_ib_4ch = TCP with channel limit, bandwidth floor.
+transport_conditions:
+  - nvlink_default
+  - no_ib
+  - no_ib_4ch
+
+alphas: [1.0]
+
+slurm:
+  partition: ice-gpu
+  qos: coc-ice
+  time: 06:00:00
+  cpus_per_task: 8
+  gpus_per_node: 4
+  gpu_type: h200
+  use_gres: true
+  mem: 64G
+  # min_nodes=2 forces all jobs onto at least 2 physical nodes.
+  # The submit script computes gpus_per_node_request = ceil(world_size / nodes),
+  # so ep=2 gets 1 GPU/node, tp2-ep2 and ep=4 get 2 GPUs/node. No waste.
+  min_nodes: 2
+  modules: [gcc/12.3.0, python/3.11, cuda/13.0.1]
+  workdir: /home/hice1/sghose7/moe-breakdown
+  uv_env_dir: /storage/ice1/0/2/sghose7/moe-breakdown-deepep-venv
+  deepep_wheel: /storage/ice1/0/2/sghose7/deepep-build/workspace/dist/deep_ep-2.0.0+d4f41e4-cp311-cp311-linux_x86_64.whl
+  extra_sbatch_args:
+    - "--exclude=atl1-1-03-013-3-0,atl1-1-03-013-8-0,atl1-1-03-013-13-0,atl1-1-03-012-18-0,atl1-1-03-012-23-0"

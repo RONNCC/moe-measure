@@ -43,16 +43,17 @@ Warmup: 30 iters | Measure: 100 iters | Seed: 42
 STUDY INDEX
 ================================================================================
 
-  Label  Config                                      Backend  Routing        Transport       Nodes  Jobs  Conditions
-  -----  ------------------------------------------  -------  -------------  --------------  -----  ----  ----------
-  A      study.deepep-ll.qwen3.yaml                  LL       uniform only   nvlink_default      1     3          33
-  B      study.deepep-ht.qwen3.yaml                  HT       uniform only   nvlink_default      1     4          56
-  C      study.deepep-ll.routing.yaml                LL       4 modes        nvlink_default      1     3         132
-  D      study.deepep-ht.routing.yaml                HT       4 modes        nvlink_default      1     4         224
-  E      study.deepep-ht.routing.transport.yaml      HT       4 modes        2 transports        1     8         448
-  F      study.deepep-ht.shapes.yaml                 HT       uniform        nvlink_default      1     3         126
-  G      study.deepep-ht.multinode.yaml              HT       uniform        nvlink_default     1-4    4          56
-                                                                                           Total:  29        1075
+  Label  Config                                           Backend  Routing    Transport           Nodes  Jobs  Conditions
+  -----  -----------------------------------------------  -------  ---------  ------------------  -----  ----  ----------
+  A      study.deepep-ll.qwen3.yaml                       LL       uniform    nvlink_default          1     3          33
+  B      study.deepep-ht.qwen3.yaml                       HT       uniform    nvlink_default          1     4          56
+  C      study.deepep-ll.routing.yaml                     LL       4 modes    nvlink_default          1     3         132
+  D      study.deepep-ht.routing.yaml                     HT       4 modes    nvlink_default          1     4         224
+  E      study.deepep-ht.routing.transport.yaml           HT       4 modes    nvlink + no_nvls        1     8         448
+  F      study.deepep-ht.shapes.yaml                      HT       uniform    nvlink_default          1     3         126
+  G      study.deepep-ht.multinode.yaml                   HT       uniform    nvlink_default         1-4    4          56
+  H      study.deepep-ht.multinode-crossover.yaml         HT       4 modes    nvlink+no_ib+no_ib4    2    12         672
+                                                                                                Total:  41        1747
 
 Utilization columns (added to all new runs via GpuUtilSampler in runner.py):
   gpu_util_pct_mean_maxrank    : mean SM utilization % during measure_iters (worst rank)
@@ -209,6 +210,35 @@ Key comparison: dispatch volume per token scales with hidden_size × topk.
 Submit:
   python expt-3-deeptest/scripts/submit_slurm_study.py \
       --config expt-3-deeptest/configs/study.deepep-ht.shapes.yaml
+
+================================================================================
+STUDY H: deepep-ht-multinode-crossover-qwen3  [PENDING SUBMISSION]
+================================================================================
+
+Config: expt-3-deeptest/configs/study.deepep-ht.multinode-crossover.yaml
+Output: ~/scratch/moe-breakdown-runs/expt-3-deeptest/deepep-ht-multinode-crossover-qwen3/
+
+Backend: deepep_high_throughput | min_nodes=2 (all jobs forced to span 2 physical nodes)
+Routing: uniform, zipfian, skewed-2x, skewed-4x
+Transport:
+  nvlink_default : IB at full speed (NCCL auto-selects IB for cross-node traffic)
+  no_ib          : TCP/IP fallback — NCCL_IB_DISABLE=1 (congested/absent fabric)
+  no_ib_4ch      : TCP with 4 channels — bandwidth floor for inter-node path
+
+Parallel points and GPU placement (2 nodes × up to 4 GPUs/node):
+  tp1-ep1  : 1 GPU total (control — no dispatch, 2-node alloc but 1 task)
+  tp1-ep2  : 1 GPU per node → every dispatch token crosses the IB fabric
+  tp2-ep2  : 2 GPUs per node → TP allreduce on NVLink, EP dispatch on IB  ← most realistic
+  tp1-ep4  : 2 GPUs per node → 4-way EP, all inter-node
+Total SLURM jobs: 12 | Conditions per job: 56 | Grand total: 672
+
+Key comparison with single-node (Studies B/D/E):
+  Study B/D tp1-ep2 (1 node) vs Study H tp1-ep2 (2 nodes): SAME EP, different fabric
+  Study B/D tp2-ep2 (1 node) vs Study H tp2-ep2 (2 nodes): production-realistic TP+EP
+
+Submit:
+  python expt-3-deeptest/scripts/submit_slurm_study.py \
+      --config expt-3-deeptest/configs/study.deepep-ht.multinode-crossover.yaml
 
 ================================================================================
 STUDY G: deepep-ht-multinode-qwen3  [PENDING SUBMISSION]
